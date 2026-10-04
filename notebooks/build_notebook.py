@@ -76,8 +76,21 @@ HF_MODEL_ID = "Qwen/Qwen3-14B"
 MAX_CHARS = 6000
 # 手順3で評価する件数。まず 3 で試し、問題なければ None(全件)にする。
 EVAL_LIMIT = 3
-# 手順3の出力: 関連性の評価結果(Excel)。
+# 手順3の出力: 関連性の評価結果(Excel)。文献番号は Google Patents へのリンクになる。
 RESULT_EVAL_XLSX = "results/evaluation.xlsx"
+
+# 出願企業の表示名を統一する対応表。{正規化した名前: 表示名}。
+# 正規化した名前は、全角半角をそろえ、空白・中黒と「株式会社」「インコーポレイテッド」等の法人格を除いたもの。
+# 例: "エルジー　エレクトロニクス　インコーポレイティド" -> "エルジーエレクトロニクス"。必要に応じて追加する。
+COMPANY_ALIASES = {
+    "三星電子": "Samsung Electronics",
+    "三星エスディアイ": "Samsung SDI",
+    "エルジーエレクトロニクス": "LG Electronics",
+    "エルジーエナジーソリューション": "LG Energy Solution",
+    "エルジーケム": "LG Chem",
+    "エルジーディスプレイ": "LG Display",
+    "シェイプコープ": "Shape Corp.",
+}
 
 # 出力先フォルダを作る(すでにあれば何もしない)。
 Path("results").mkdir(exist_ok=True)'''
@@ -122,12 +135,12 @@ result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状
 STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
 # LLM で 1 件ずつ評価し、結果の表を受け取る。
-evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS)
-# 結果を Excel に保存する。
-evaluation.to_excel(RESULT_EVAL_XLSX, index=False)
+evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES)
+# 結果を Excel に保存する(文献番号をクリックで Google Patents が開く。列と順番は固定)。
+save_evaluation_excel(evaluation, RESULT_EVAL_XLSX)
 print('->', RESULT_EVAL_XLSX)
-# 結果の表を画面に表示する。
-evaluation"""
+# 結果の表を画面に表示する(リンク列は Excel 側でだけ使うので除く)。
+evaluation.drop(columns=["リンク"])"""
 
 md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
 
@@ -207,7 +220,7 @@ cells = [
             "設定の BACKEND・TOPIC_*、results/text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain(13, "手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度(0〜3)・理由・根拠の引用・引用の検証を、関連度の高い順の表にして保存する",
+            "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、results/text/ の全文 JSON、backend、topic", "evaluation(表)、results/evaluation.xlsx"),
     code(STEP3_RUN),
 ]

@@ -60,7 +60,7 @@ def test_evaluate_table(tmp_path):
     ])
     fake = lambda s, u, schema: json.dumps({"score": 2, "judgement": "関連あり", "reason": "r", "evidence": []})
     df = evaluate_table(fake, TOPIC, nums, tmp_path)
-    assert df.loc[0, "文献番号"] == "特開1" and df.loc[0, "関連度(0-3)"] == 2
+    assert df.loc[0, "文献番号"] == "特開1" and df.loc[0, "関連度"] == 2
     assert df.loc[1, "判定"] == "本文なし(未取得)"
 
 
@@ -69,3 +69,39 @@ def test_short_acronym_is_case_sensitive_and_bounded():
     _, hits = keyword_snippets(text, ["SHAPE", "NAI"])
     assert hits == 3  # SHAPE-MaP の SHAPE、SHAPE試薬、NAI。DGSHAPE / shaped / naive は除外
     assert keyword_snippets("Total RNA-seq と total rna", ["total RNA"])[1] == 2  # 通常語は大小無視
+
+
+def test_company_name_normalization_and_aliases():
+    from patent_search.evaluate import company_name
+
+    assert company_name("エルジー　エレクトロニクス　インコーポレイティド") == "エルジーエレクトロニクス"
+    assert company_name("ＤＧＳＨＡＰＥ株式会社") == "DGSHAPE"
+    assert company_name("シェイプ・コープ") == "シェイプコープ"
+    assert company_name("三星電子株式会社", {"三星電子": "Samsung Electronics"}) == "Samsung Electronics"
+    assert company_name(None) == ""
+
+
+def test_final_excel_columns_hyperlink_and_summary(tmp_path):
+    import pandas as pd
+    from openpyxl import load_workbook
+
+    from patent_search.evaluate import FINAL_COLUMNS, evaluate_table, save_evaluation_excel
+
+    (tmp_path / "JP1A.json").write_text(json.dumps(REC), encoding="utf-8")
+    nums = pd.DataFrame([
+        {"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "発明の名称": "a", "出願人/権利者": "ＤＧＳＨＡＰＥ株式会社",
+         "出願人(他あり)": True, "ステータス": "審査中", "Google Patents URL(推定)": "https://patents.google.com/patent/JP1A/ja"},
+        {"文献番号": "特開2", "Google Patents ID(推定)": "JP2A", "発明の名称": "b", "出願人/権利者": "X",
+         "出願人(他あり)": False, "ステータス": "-", "Google Patents URL(推定)": "https://patents.google.com/patent/JP2A/ja"},
+    ])
+    # summary を返さない LLM → 要約で代用される
+    fake = lambda s, u, schema: json.dumps({"score": 2, "judgement": "関連あり", "reason": "r", "summary": "", "evidence": []})
+    df = evaluate_table(fake, TOPIC, nums, tmp_path)
+    assert df.loc[0, "出願人・権利者"] == "ＤＧＳＨＡＰＥ株式会社（他あり）" and df.loc[0, "出願企業"] == "DGSHAPE"
+    assert df.loc[0, "発明内容概要"].startswith("（要約より）要約")
+    path = tmp_path / "out.xlsx"
+    save_evaluation_excel(df, path)
+    ws = load_workbook(path)["評価結果"]
+    assert [c.value for c in ws[1]] == FINAL_COLUMNS  # 指定どおりの列と順序
+    assert ws["A2"].value == "特開1" and ws["A2"].hyperlink.target == "https://patents.google.com/patent/JP1A/ja"
+    assert ws["B3"].value == "本文なし(未取得)"

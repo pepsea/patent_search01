@@ -5,7 +5,8 @@
  2. build_prompt    : 調べたいこと + 判定基準 + 特許の本文(抜粋)から、LLM に渡す文章を作る
  3. バックエンド    : ollama_backend(この PC) / guidance_backend(サーバー)で LLM に判定させる
  4. check_evidence  : LLM が出した「根拠の引用」が原文に実在するかを確認する
- 5. evaluate_table  : 上を全件に繰り返し、関連度の高い順の結果表を返す
+ 5. evaluate_table  : 上を全件に繰り返し、関連度の高い順の結果表を返す(発明内容概要・出願企業も付ける)
+ 6. save_evaluation_excel: 結果表を Excel に保存する(文献番号は Google Patents へのリンク)
 
 - 判定結果は JSON スキーマで制約する（Ollama: format 指定 / Hugging Face: guidance の json 文法）。
   どちらのバックエンドでも同じプロンプト・同じスキーマなので、サーバー移植時はバックエンドだけ差し替える。
@@ -26,9 +27,10 @@ SCHEMA = {
         "score": {"type": "integer", "enum": [0, 1, 2, 3]},
         "judgement": {"type": "string", "enum": ["直接関連", "関連あり", "わずかに関連", "無関係"]},
         "reason": {"type": "string", "maxLength": 300},
+        "summary": {"type": "string", "maxLength": 220},
         "evidence": {"type": "array", "items": {"type": "string", "maxLength": 200}, "maxItems": 3},
     },
-    "required": ["score", "judgement", "reason", "evidence"],
+    "required": ["score", "judgement", "reason", "summary", "evidence"],
     "additionalProperties": False,
 }
 
@@ -69,7 +71,8 @@ USER_TEMPLATE = """# 調査テーマ
 {description}
 
 # 出力
-JSON のみを出力する。evidence には、上の本文からそのまま抜き出した短い引用（最大3件、各200字以内、改変禁止）を入れる。
+JSON のみを出力する。summary には、この特許の発明の内容（何を、どうする発明か）を、専門外の人にも分かる日本語で100〜150字にまとめる（要約と請求項に基づき、本文にないことは書かない）。
+evidence には、上の本文からそのまま抜き出した短い引用（最大3件、各200字以内、改変禁止）を入れる。
 根拠が本文にない場合は evidence を空配列にし、score は 0 か 1 にする。"""
 
 
@@ -191,16 +194,55 @@ def evaluate_one(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_ch
     try:
         out = json.loads(backend(SYSTEM, prompt, SCHEMA))
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        return {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "evidence": [],
-                "evidence_check": "", "keyword_hits": hits}
+        return {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "summary": "",
+                "evidence": [], "evidence_check": "", "keyword_hits": hits}
     source = rec["abstract_nfkc"] + rec["claims_nfkc"] + rec["description_nfkc"]
     out["evidence_check"] = check_evidence(out.get("evidence", []), source)
     out["keyword_hits"] = hits
     return out
 
 
-def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000):
-    """文献番号表(numbers: DataFrame)の各行を、全文JSON(text_dir/{ID}.json)で評価し、結果の表を返す。"""
+# 最終の Excel に出す列と順番。
+FINAL_COLUMNS = ["文献番号", "判定", "関連度", "関連語ヒット数", "理由", "引用の検証", "根拠の引用",
+                 "発明の名称", "出願人・権利者", "出願企業", "ステータス", "発明内容概要"]
+
+# 法人格・会社の種類を表す語。名前の末尾から取り除く(途中の「インク」等は残すため、末尾だけ)。
+_CORP_SUFFIXES = [
+    "インコーポレイテッド", "インコーポレイティド", "インコーポレーテッド", "インコーポレイテツド", "コーポレーション", "コーポレイション",
+    "ライアビリティ", "リミテッド", "リミティド", "カンパニー", "エルエルシー", "ゲーエムベーハー", "アクチェンゲゼルシャフト",
+    "ソシエテアノニム", "アーゲー", "インク",
+]
+# 法人格を表す漢字の語。名前のどこにあっても取り除く(前株・後株の両方に対応)。
+_CORP_KANJI = ["株式会社", "有限会社", "合同会社", "股份有限公司", "有限公司"]
+
+
+def company_name(applicant, aliases: dict | None = None) -> str:
+    """出願人の欄から、出願企業名を作る。
+
+    全角半角をそろえ、区切り(空白・中黒・読点)と法人格の語(株式会社、インコーポレイテッド など)を取り除く。
+    aliases({正規化した名前: 表示名})に一致すれば、その表示名を使う。
+    出願人が複数の場合、J-PlatPat の一覧に載っているのは先頭の 1 者だけ(「他あり」)。
+    """
+    if not isinstance(applicant, str) or not applicant.strip():
+        return ""
+    # 特許庁の外字表記「▲ふん▼」は「份」(股份有限公司)のこと
+    name = nfkc(applicant).replace("▲ふん▼", "份")
+    for w in _CORP_KANJI:
+        name = name.replace(w, "")
+    name = re.sub(r"[\s・･,，.．、]+", "", name)
+    # 末尾の法人格の語を、なくなるまで繰り返し取り除く(名前全体が消える場合は止める)
+    changed = True
+    while changed:
+        changed = False
+        for w in _CORP_SUFFIXES:
+            if name.endswith(w) and len(name) > len(w):
+                name = name[: -len(w)]
+                changed = True
+    return (aliases or {}).get(name, name)
+
+
+# 作業: 文献番号表の各行を、全文 JSON(text_dir/{ID}.json)で評価し、FINAL_COLUMNS の順の結果表を返す。
+def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None):
     from pathlib import Path
 
     import pandas as pd
@@ -209,8 +251,11 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
     for _, r in numbers.iterrows():
         pid = r.get("Google Patents ID(推定)")
         path = Path(text_dir) / f"{pid}.json"
-        base = {"文献番号": r["文献番号"], "発明の名称": r.get("発明の名称"), "出願人/権利者": r.get("出願人/権利者"),
-                "ステータス": r.get("ステータス"), "Google Patents URL": r.get("Google Patents URL(推定)")}
+        applicant = r.get("出願人/権利者")
+        more = "（他あり）" if r.get("出願人(他あり)") is True or str(r.get("出願人(他あり)")) == "True" else ""
+        base = {"文献番号": r["文献番号"], "リンク": r.get("Google Patents URL(推定)"), "発明の名称": r.get("発明の名称"),
+                "出願人・権利者": f"{applicant}{more}" if isinstance(applicant, str) else "",
+                "出願企業": company_name(applicant, aliases), "ステータス": r.get("ステータス")}
         if not path.exists():
             rows.append({**base, "判定": "本文なし(未取得)"})
             continue
@@ -219,13 +264,46 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
             o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars)
         # 接続断などでも、1 件の失敗で全体を止めず、失敗として記録して次へ進む
         except Exception as e:
-            o = {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "evidence": [],
-                 "evidence_check": "", "keyword_hits": None}
-        rows.append({**base, "関連度(0-3)": o["score"], "判定": o["judgement"], "理由": o["reason"],
+            o = {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "summary": "",
+                 "evidence": [], "evidence_check": "", "keyword_hits": None}
+        # LLM の概要が空なら、Google Patents の要約(公式)の先頭で代用し、その旨を付ける
+        summary = o.get("summary") or (("（要約より）" + rec["abstract_nfkc"][:150]) if rec.get("abstract_nfkc") else "")
+        rows.append({**base, "関連度": o["score"], "判定": o["judgement"], "理由": o["reason"],
                      "根拠の引用": " / ".join(o["evidence"]), "引用の検証": o["evidence_check"],
-                     "関連語ヒット数": o["keyword_hits"]})
+                     "関連語ヒット数": o["keyword_hits"], "発明内容概要": summary})
         print(r["文献番号"], o["score"], o["judgement"], flush=True)
     df = pd.DataFrame(rows)
-    if "関連度(0-3)" in df:
-        df = df.sort_values("関連度(0-3)", ascending=False, na_position="last", kind="stable")
-    return df.reset_index(drop=True)
+    for c in FINAL_COLUMNS + ["リンク"]:
+        if c not in df:
+            df[c] = None
+    df = df.sort_values("関連度", ascending=False, na_position="last", kind="stable")
+    return df[FINAL_COLUMNS + ["リンク"]].reset_index(drop=True)
+
+
+# 作業: 結果表を Excel に保存する。文献番号をクリックで Google Patents が開くリンクにし、見やすく整える。
+def save_evaluation_excel(df, path) -> None:
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    out = df[FINAL_COLUMNS]
+    with __import__("pandas").ExcelWriter(path, engine="openpyxl") as w:
+        out.to_excel(w, index=False, sheet_name="評価結果")
+        ws = w.sheets["評価結果"]
+        widths = {"文献番号": 18, "判定": 14, "関連度": 8, "関連語ヒット数": 10, "理由": 50, "引用の検証": 20,
+                  "根拠の引用": 60, "発明の名称": 40, "出願人・権利者": 28, "出願企業": 20, "ステータス": 22, "発明内容概要": 60}
+        wrap = {"理由", "根拠の引用", "発明の名称", "出願人・権利者", "発明内容概要"}
+        for j, c in enumerate(FINAL_COLUMNS, start=1):
+            ws.column_dimensions[get_column_letter(j)].width = widths[c]
+            head = ws.cell(row=1, column=j)
+            head.font = Font(bold=True)
+            head.fill = PatternFill("solid", fgColor="DDDDDD")
+            for i in range(2, len(out) + 2):
+                ws.cell(row=i, column=j).alignment = Alignment(wrap_text=c in wrap, vertical="top")
+        # 文献番号のセルに、Google Patents へのリンクを付ける
+        for i, url in enumerate(df["リンク"], start=2):
+            if isinstance(url, str) and url:
+                cell = ws.cell(row=i, column=1)
+                cell.hyperlink = url
+                cell.font = Font(color="0563C1", underline="single")
+        ws.freeze_panes = "B2"
+        ws.auto_filter.ref = ws.dimensions
