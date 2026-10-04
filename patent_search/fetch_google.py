@@ -84,20 +84,10 @@ def fetch(session: requests.Session, pid: str, html_dir: Path, delay: float):
     return "", pid, status
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("input")
-    ap.add_argument("output")
-    ap.add_argument("--html-dir", default="results/html")
-    ap.add_argument("--limit", type=int)
-    ap.add_argument("--delay", type=float, default=3.0)
-    a = ap.parse_args()
-
-    html_dir = Path(a.html_dir)
+def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0) -> pd.DataFrame:
+    """文献番号の表(Google Patents ID(推定) 列を持つ)から取得・抽出し、結果の表を返す。"""
+    html_dir = Path(html_dir)
     html_dir.mkdir(parents=True, exist_ok=True)
-    df = pd.read_excel(a.input)
-    if a.limit:
-        df = df.head(a.limit)
     sess = requests.Session()
     sess.headers["User-Agent"] = UA
     rows = []
@@ -108,7 +98,7 @@ def main() -> int:
             rec.update({"取得状況": "IDなし"})
         else:
             try:
-                html, used, status = fetch(sess, pid, html_dir, a.delay)
+                html, used, status = fetch(sess, pid, html_dir, delay)
             except requests.RequestException as e:
                 html, used, status = "", pid, f"error: {type(e).__name__}"
             rec.update({"使用ID": used, "取得状況": status})
@@ -125,7 +115,21 @@ def main() -> int:
                     rec["抽出状況"] += " / 請求項を切り詰め"
         rows.append(rec)
         print(rec["文献番号"], rec.get("取得状況"), rec.get("抽出状況", ""), flush=True)
-    pd.DataFrame(rows).to_excel(a.output, index=False)
+    return pd.DataFrame(rows)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("input")
+    ap.add_argument("output")
+    ap.add_argument("--html-dir", default="results/html")
+    ap.add_argument("--limit", type=int)
+    ap.add_argument("--delay", type=float, default=3.0)
+    a = ap.parse_args()
+    df = pd.read_excel(a.input)
+    if a.limit:
+        df = df.head(a.limit)
+    run(df, Path(a.html_dir), a.delay).to_excel(a.output, index=False)
     return 0
 
 
