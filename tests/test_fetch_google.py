@@ -26,3 +26,15 @@ def test_extract():
 
 def test_extract_reports_missing():
     assert "欠落" in extract("<html><body></body></html>")["extract_status"]
+
+
+def test_nfkc_and_fulltext(tmp_path):
+    import json
+
+    from patent_search.fetch_google import nfkc, save_fulltext
+
+    assert nfkc("Ｒｎａ３次") == "Rna3次"
+    x = extract(HTML)
+    x["description"] = "Ａ" * 40000  # Excel 上限を超える長さでも全文を保存する
+    d = json.loads(save_fulltext(tmp_path, "JP1A", x).read_text(encoding="utf-8"))
+    assert len(d["description"]) == 40000 and d["description_nfkc"] == "A" * 40000

@@ -23,6 +23,7 @@ cells = [
          'NUMBERS_XLSX = "results/patent_numbers.xlsx"   # 手順1の出力\n'
          'RESULT_XLSX = "results/patents_text.xlsx"      # 手順2の出力\n'
          'HTML_DIR = "results/html"               # 取得した生 HTML の保存先（再実行時は取得済みを飛ばす）\n'
+         'TEXT_DIR = "results/text"               # 全文JSONの保存先（Excelは約3万字で切れるため、LLM評価にはこちらを使う）\n'
          'LIMIT = 3                               # 手順2で処理する件数。None なら全件\n'
          'DELAY = 3.0                             # 取得間隔(秒)\n\n'
          'Path("results").mkdir(exist_ok=True)'),
@@ -47,7 +48,7 @@ cells = [
     code(fetch_src),
     md("## 手順2: 実行\nまず `LIMIT = 3` 程度で、取得状況・抽出状況を確認してください。"),
     code("targets = numbers if LIMIT is None else numbers.head(LIMIT)\n"
-         "result = run(targets, Path(HTML_DIR), DELAY)\n"
+         "result = run(targets, Path(HTML_DIR), DELAY, Path(TEXT_DIR))\n"
          "result.to_excel(RESULT_XLSX, index=False)\n"
          "print('->', RESULT_XLSX)\n"
          "result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状況', '請求項数'] if c in result]]"),

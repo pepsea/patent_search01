@@ -11,7 +11,9 @@ python -m patent_search.fetch_google IN.xlsx OUT.xlsx [--html-dir results/html] 
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import unicodedata
 import time
 from pathlib import Path
 
@@ -84,10 +86,29 @@ def fetch(session: requests.Session, pid: str, html_dir: Path, delay: float):
     return "", pid, status
 
 
-def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0) -> pd.DataFrame:
-    """文献番号の表(Google Patents ID(推定) 列を持つ)から取得・抽出し、結果の表を返す。"""
+def nfkc(text: str) -> str:
+    """全角英数字・記号を半角に揃える(NFKC)。検索や LLM 入力での表記ゆれ対策。"""
+    return unicodedata.normalize("NFKC", text)
+
+
+def save_fulltext(text_dir: Path, pid: str, x: dict) -> Path:
+    """切り詰めなしの全文(原文と NFKC 正規化)を JSON で保存する。"""
+    path = text_dir / f"{pid}.json"
+    data = {k: x[k] for k in ("title", "abstract", "claims", "description")}
+    data.update({k + "_nfkc": nfkc(x[k]) for k in ("title", "abstract", "claims", "description")})
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    return path
+
+
+def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | None = None) -> pd.DataFrame:
+    """文献番号の表(Google Patents ID(推定) 列を持つ)から取得・抽出し、結果の表を返す。
+
+    text_dir を渡すと、全文を JSON で保存する(Excel のセル上限で切り詰められるため、LLM 評価にはこちらを使う)。
+    """
     html_dir = Path(html_dir)
     html_dir.mkdir(parents=True, exist_ok=True)
+    text_dir = Path(text_dir) if text_dir else html_dir.parent / "text"
+    text_dir.mkdir(parents=True, exist_ok=True)
     sess = requests.Session()
     sess.headers["User-Agent"] = UA
     rows = []
@@ -106,10 +127,12 @@ def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0) -> pd.DataFrame:
                 x = extract(html)
                 rec.update({"名称(Google)": x["title"], "要約": x["abstract"],
                             "請求項数": x["claim_count"], "請求項": x["claims"],
-                            "明細書": x["description"], "抽出状況": x["extract_status"]})
+                            "明細書": x["description"], "明細書文字数": len(x["description"]),
+                            "名称(正規化)": nfkc(x["title"]), "全文ファイル": str(save_fulltext(text_dir, used, x)),
+                            "抽出状況": x["extract_status"]})
                 if len(x["description"]) > EXCEL_CELL_MAX:  # Excel のセル上限対策。全文は HTML 側にある
                     rec["明細書"] = x["description"][:EXCEL_CELL_MAX]
-                    rec["抽出状況"] += " / 明細書を切り詰め"
+                    rec["抽出状況"] += " / 明細書を切り詰め(全文は全文ファイル)"
                 if len(x["claims"]) > EXCEL_CELL_MAX:
                     rec["請求項"] = x["claims"][:EXCEL_CELL_MAX]
                     rec["抽出状況"] += " / 請求項を切り詰め"
