@@ -62,3 +62,10 @@ def test_evaluate_table(tmp_path):
     df = evaluate_table(fake, TOPIC, nums, tmp_path)
     assert df.loc[0, "文献番号"] == "特開1" and df.loc[0, "関連度(0-3)"] == 2
     assert df.loc[1, "判定"] == "本文なし(未取得)"
+
+
+def test_short_acronym_is_case_sensitive_and_bounded():
+    text = "DGSHAPE社の shaped 形状。RNAをSHAPE-MaPで解析し、SHAPE試薬NAIを使う。naive な方法。"
+    _, hits = keyword_snippets(text, ["SHAPE", "NAI"])
+    assert hits == 3  # SHAPE-MaP の SHAPE、SHAPE試薬、NAI。DGSHAPE / shaped / naive は除外
+    assert keyword_snippets("Total RNA-seq と total rna", ["total RNA"])[1] == 2  # 通常語は大小無視

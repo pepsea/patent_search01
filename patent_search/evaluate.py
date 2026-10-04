@@ -79,12 +79,28 @@ def nfkc(s: str) -> str:
     return unicodedata.normalize("NFKC", s)
 
 
+def _keyword_patterns(keywords: list[str]) -> list[re.Pattern]:
+    """通常の語は大文字小文字を区別しない。SHAPE・NAI・DMS のような大文字だけの短い略語は、
+    shape(形状)・naive・DGSHAPE 等への誤一致を避けるため、大文字小文字を区別し前後に英数字がある場合は除外する。"""
+    ci, strict = [], []
+    for k in map(nfkc, keywords):
+        if re.fullmatch(r"[A-Z0-9]{2,6}", k):
+            strict.append(r"(?<![A-Za-z0-9])" + re.escape(k) + r"(?![A-Za-z0-9])")
+        else:
+            ci.append(re.escape(k))
+    pats = []
+    if ci:
+        pats.append(re.compile("|".join(ci), re.IGNORECASE))
+    if strict:
+        pats.append(re.compile("|".join(strict)))
+    return pats
+
+
 def keyword_snippets(text: str, keywords: list[str], width: int = 150, max_snippets: int = 8) -> tuple[list[str], int]:
     """関連語の前後 width 文字を抜粋する(重なる範囲は結合)。(抜粋, 全ヒット数) を返す。"""
     if not keywords:
         return [], 0
-    pat = re.compile("|".join(re.escape(nfkc(k)) for k in keywords), re.IGNORECASE)
-    hits = [m.span() for m in pat.finditer(text)]
+    hits = sorted(m.span() for pat in _keyword_patterns(keywords) for m in pat.finditer(text))
     spans: list[list[int]] = []
     for a, b in hits:
         a, b = max(0, a - width), min(len(text), b + width)
