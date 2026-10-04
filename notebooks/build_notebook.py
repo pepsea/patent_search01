@@ -5,6 +5,7 @@ import nbformat as nbf
 
 root = Path(__file__).resolve().parents[1]
 platpat = (root / "patent_search/platpat.py").read_text(encoding="utf-8")
+runs_src = (root / "patent_search/runs.py").read_text(encoding="utf-8")
 evaluate_src = (root / "patent_search/evaluate.py").read_text(encoding="utf-8")
 fetch_src = (root / "patent_search/fetch_google.py").read_text(encoding="utf-8")
 fetch_src = fetch_src[: fetch_src.index("def main()")].rstrip() + "\n"
@@ -18,14 +19,13 @@ import json
 INPUT_DIR = "../data"
 # フォルダ内で読み込むファイルの名前の形。
 INPUT_PATTERN = "*.txt"
-# 手順1の出力: 重複を除いた文献番号の一覧(Excel)。
-NUMBERS_XLSX = "results/patent_numbers.xlsx"
-# 手順2の出力: 名称・要約・請求項・明細書の表(Excel)。
-RESULT_XLSX = "results/patents_text.xlsx"
-# 取得した生の HTML の保存先。再実行時は、ここにあるものは取得し直さない。
-HTML_DIR = "results/html"
-# 全文 JSON の保存先。Excel は約3万字で切れるため、LLM 評価にはこちらを使う。
-TEXT_DIR = "results/text"
+# 結果を入れる大元のフォルダ。この中に「トピック名_日時」の調査フォルダが作られる。
+RESULTS_ROOT = "results"
+# None なら、実行のたびに新しい調査フォルダを作る。途中から続ける場合は、既存のフォルダ名を指定する。
+# 例: "TOTAL-RNA-seq_20261004_153005"
+RUN_DIR = None
+# 取得した HTML を調査をまたいで共有する場所。同じ特許を別の調査で、Google に取りに行かないために使う。
+CACHE_DIR = "results/_html_cache"
 # 手順2で処理する件数。まず 3 で試し、問題なければ None(全件)にする。
 LIMIT = 3
 # Google Patents へのアクセス間隔(秒)。短くしすぎない。
@@ -76,8 +76,6 @@ HF_MODEL_ID = "Qwen/Qwen3-14B"
 MAX_CHARS = 6000
 # 手順3で評価する件数。まず 3 で試し、問題なければ None(全件)にする。
 EVAL_LIMIT = 3
-# 手順3の出力: 関連性の評価結果(Excel)。文献番号は Google Patents へのリンクになる。
-RESULT_EVAL_XLSX = "results/evaluation.xlsx"
 
 # 出願企業の表示名を統一する対応表。{正規化した名前: 表示名}。
 # 正規化した名前は、全角半角をそろえ、空白・中黒と「株式会社」「インコーポレイテッド」等の法人格を除いたもの。
@@ -92,8 +90,28 @@ COMPANY_ALIASES = {
     "シェイプコープ": "Shape Corp.",
 }
 
-# 出力先フォルダを作る(すでにあれば何もしない)。
-Path("results").mkdir(exist_ok=True)'''
+# 大元のフォルダを作る(すでにあれば何もしない)。
+Path(RESULTS_ROOT).mkdir(exist_ok=True)'''
+
+RUN_CELL = '''# 調査フォルダ「トピック名_日時」を作る(RUN_DIR を指定した場合は、その既存フォルダを使う)。
+run_dir = make_run_dir(RESULTS_ROOT, TOPIC_NAME, RUN_DIR)
+# 入力の txt を、調査フォルダの input/ にコピーして残す。
+copied = register_inputs(run_dir, INPUT_DIR, INPUT_PATTERN)
+# 以降のセルが使う出力先を、すべて調査フォルダの中に決める。
+NUMBERS_XLSX = run_dir / "patent_numbers.xlsx"
+RESULT_XLSX = run_dir / "patents_text.xlsx"
+HTML_DIR = run_dir / "html"
+TEXT_DIR = run_dir / "text"
+RESULT_EVAL_XLSX = run_dir / "evaluation.xlsx"
+# 今回の設定を run_settings.json に保存する(後から、何を調べたかを確認できる)。
+save_run_settings(run_dir, {
+    "トピック名": TOPIC_NAME, "定義": TOPIC_DEFINITION, "関連語": TOPIC_KEYWORDS,
+    "含める条件": TOPIC_INCLUDE, "除外する条件": TOPIC_EXCLUDE,
+    "LLM方式": BACKEND, "モデル": OLLAMA_MODEL if BACKEND == "ollama" else HF_MODEL_ID,
+    "num_ctx": OLLAMA_NUM_CTX, "本文の最大文字数": MAX_CHARS, "取得件数(LIMIT)": LIMIT, "評価件数(EVAL_LIMIT)": EVAL_LIMIT,
+    "取得間隔(秒)": DELAY, "入力フォルダ": INPUT_DIR, "入力ファイル": copied, "出願企業の別名": COMPANY_ALIASES,
+})
+print("調査フォルダ:", run_dir)'''
 
 STEP1_RUN = '''import pandas as pd
 
@@ -125,7 +143,7 @@ print(prompt)'''
 STEP2_RUN = """# LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets = numbers if LIMIT is None else numbers.head(LIMIT)
 # 取得・抽出を実行し、結果の表を受け取る。
-result = run(targets, Path(HTML_DIR), DELAY, Path(TEXT_DIR))
+result = run(targets, Path(HTML_DIR), DELAY, Path(TEXT_DIR), Path(CACHE_DIR))
 # 結果を Excel に保存する。
 result.to_excel(RESULT_XLSX, index=False)
 print('->', RESULT_XLSX)
@@ -145,9 +163,13 @@ evaluation.drop(columns=["リンク"])"""
 md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
 
 
-def explain(n, title, work, inp, out):
+_n = [0]
+
+
+def explain(title, work, inp, out):
     """各コードセルの直前に置く説明(作業・入力・出力)。"""
-    return md(f"### セル{n}: {title}\n- **作業**: {work}\n- **入力**: {inp}\n- **出力**: {out}")
+    _n[0] += 1
+    return md(f"### セル{_n[0]}: {title}\n- **作業**: {work}\n- **入力**: {inp}\n- **出力**: {out}")
 
 
 cells = [
@@ -156,72 +178,82 @@ cells = [
        "2. 文献番号から Google Patents（日本語ページ）の HTML を取得し、名称・要約・請求項・明細書を Excel に出力する\n"
        "3. ローカル LLM で、各特許が「調べたいこと」に関連するかを評価して表にする\n\n"
        "**使い方**: 上から順に実行。まず設定セルの値を変更し、手順2・3は `LIMIT` / `EVAL_LIMIT = 3` などで少数件を試してから全件にしてください。\n\n"
-       "**各セルの説明は、そのセルの上にあります。** プログラム本体のセル（セル3・8・11）は、先頭にそのプログラムの作業の流れが書いてあります。\n\n"
+       "**各セルの説明は、そのセルの上にあります。** プログラム本体のセル（タイトルが「プログラム○」のもの）は、先頭にそのプログラムの作業の流れが書いてあります。\n\n"
        "注意: Google Patents の自動取得は利用規約上の制限を受け得ます。`DELAY` を空けて、必要な件数だけ実行してください。"),
 
-    explain(1, "ライブラリの準備",
+    explain("ライブラリの準備",
             "必要な Python ライブラリ(表計算・Excel 出力・通信・HTML 解析)を入れる。入っていれば何もしない",
             "なし", "なし(ライブラリが使える状態になる)"),
     code("%pip install -q pandas openpyxl requests beautifulsoup4 lxml"),
 
-    explain(2, "設定（調べたいことはここに書く）",
+    explain("設定（調べたいことはここに書く）",
             "フォルダ・出力先・件数などの設定と、手順3の「調べたいこと」、使う LLM を決める。各設定の上にその意味を書いてある",
             "あなたが書き換える値", "なし(以降のセルが、ここの値を使う)"),
     code(SETTINGS),
 
+    md("## 調査フォルダの作成"),
+    explain("プログラム0: 調査フォルダの作成と登録",
+            "「トピック名_日時」のフォルダを作り、入力の txt と設定を登録する。同じ調査を続ける場合は、既存のフォルダを指定できる",
+            "なし(関数を定義するだけ)", "なし(次のセルで使う関数 make_run_dir などができる)"),
+    code(runs_src),
+    explain("調査フォルダの作成",
+            "設定のトピック名と現在の日時で調査フォルダを作り、入力の txt を input/ にコピーし、設定を run_settings.json に保存する。"
+            "以降の出力は、すべてこのフォルダの中に入る(html/ text/ patent_numbers.xlsx patents_text.xlsx evaluation.xlsx)",
+            "設定のトピック名・RUN_DIR・各設定、INPUT_DIR の txt", "調査フォルダ、run_dir、各出力ファイルの場所(NUMBERS_XLSX など)"),
+    code(RUN_CELL),
     md("## 手順1: 文献番号の一覧を作る"),
-    explain(3, "プログラム1: テキストの読み取り",
+    explain("プログラム1: テキストの読み取り",
             "J-PlatPat の結果一覧テキストを 1 件ずつに区切り、文献番号・出願番号・日付・名称・出願人・ステータス・FI に振り分ける。"
             "フォルダ内の複数ファイルをまとめ、文献番号で重複を除く。Google Patents の ID 候補も作る",
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 parse_text・build_list などができる)"),
     code(platpat),
-    explain(4, "手順1の実行: 一覧の作成",
+    explain("手順1の実行: 一覧の作成",
             "設定したフォルダの全 txt を読み、重複を除いた文献番号の一覧を作って Excel に保存する",
-            "設定の INPUT_DIR 内の txt", "numbers(一覧)、report(報告)、results/patent_numbers.xlsx"),
+            "設定の INPUT_DIR 内の txt", "numbers(一覧)、report(報告)、調査フォルダ内の patent_numbers.xlsx"),
     code(STEP1_RUN),
-    explain(5, "確認: ファイル間で内容が違った行",
+    explain("確認: ファイル間で内容が違った行",
             "同じ文献番号でファイル間にステータス等の違いがあった行を表示する。新しいファイルの内容を採用済み",
             "report", "表(空なら該当なし)"),
     code("report['conflicts']"),
-    explain(6, "確認: 読み取れなかった行",
+    explain("確認: 読み取れなかった行",
             "文献番号や日付の書式が想定と違い、読み取りに警告が出た行を表示する",
             "numbers", "表(空なら問題なし)"),
     code("numbers[numbers['警告'] != ''][['No.', '文献番号', '警告']]"),
-    explain(7, "確認: 同じ出願番号で別の文献番号の行",
+    explain("確認: 同じ出願番号で別の文献番号の行",
             "同じ出願番号で文献番号が違う行(公開公報と登録公報など)を表示する。除外はしていないので、重複評価を避けたい場合の参考にする",
             "numbers", "表"),
     code("numbers[numbers['同一出願番号の別文献'] != ''][['文献番号', '出願番号', '同一出願番号の別文献']]"),
 
     md("## 手順2: Google Patents から本文を取得する"),
-    explain(8, "プログラム2: HTML の取得と本文の抽出",
+    explain("プログラム2: HTML の取得と本文の抽出",
             "文献番号から Google Patents の日本語ページの HTML を取得して保存し、名称・要約・請求項・明細書を取り出す。"
             "全文は切り詰めずに JSON でも保存する(原文と、全角を半角に揃えた版)",
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 run などができる)"),
     code(fetch_src),
-    explain(9, "手順2の実行: 取得と抽出",
+    explain("手順2の実行: 取得と抽出",
             "一覧の先頭から LIMIT 件について、HTML を取得し本文を抽出して Excel に保存する。取得済みの HTML は再利用する",
-            "numbers、設定の LIMIT・DELAY", "result(表)、results/patents_text.xlsx、results/html/、results/text/"),
+            "numbers、設定の LIMIT・DELAY", "result(表)、調査フォルダ内の patents_text.xlsx、html/、text/(共有キャッシュにも HTML を保存)"),
     code(STEP2_RUN),
-    explain(10, "確認: 取得・抽出に失敗した行",
+    explain("確認: 取得・抽出に失敗した行",
             "取得状況が 200 / cache 以外、または抽出状況が OK 以外の行を表示する",
             "result", "表(空なら全件成功)"),
     code("result[(result['取得状況'].isin(['200', 'cache']) == False) | (result.get('抽出状況', 'OK') != 'OK')]"),
 
     md("## 手順3: LLM による関連性の評価"),
-    explain(11, "プログラム3: 関連性の評価",
+    explain("プログラム3: 関連性の評価",
             "調べたいことの関連語の周辺を本文から抜粋し、判定基準と一緒に LLM へのプロンプトを作って判定させる。"
             "判定は JSON の形式に制約され、「根拠の引用」が原文に実在するかも自動で確認する",
             "なし(関数を定義するだけ)", "なし(次の 2 つのセルで使う関数ができる)"),
     code(evaluate_src),
-    explain(12, "LLM の準備とプロンプトの確認",
+    explain("LLM の準備とプロンプトの確認",
             "設定の BACKEND に応じて LLM に問い合わせる準備をし、調べたいことをまとめ、実際に LLM に渡る文章(プロンプト)の見本を表示する。"
             "ollama は Ollama の起動と `ollama pull qwen3:14b` 済みであること。"
             "guidance は `pip install guidance transformers torch accelerate` が必要で、モデルは初回に Hugging Face から取得される",
-            "設定の BACKEND・TOPIC_*、results/text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
+            "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
-    explain(13, "手順3の実行: 評価",
+    explain("手順3の実行: 評価",
             "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
-            "numbers、results/text/ の全文 JSON、backend、topic", "evaluation(表)、results/evaluation.xlsx"),
+            "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
 ]
 nb = nbf.v4.new_notebook(cells=cells)

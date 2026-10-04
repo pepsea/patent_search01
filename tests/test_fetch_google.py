@@ -38,3 +38,19 @@ def test_nfkc_and_fulltext(tmp_path):
     x["description"] = "Ａ" * 40000  # Excel 上限を超える長さでも全文を保存する
     d = json.loads(save_fulltext(tmp_path, "JP1A", x).read_text(encoding="utf-8"))
     assert len(d["description"]) == 40000 and d["description_nfkc"] == "A" * 40000
+
+
+def test_fetch_uses_shared_cache_without_network(tmp_path):
+    from patent_search.fetch_google import fetch
+
+    html_dir, cache_dir = tmp_path / "run" / "html", tmp_path / "cache"
+    html_dir.mkdir(parents=True)
+    cache_dir.mkdir()
+    (cache_dir / "JP1A.html").write_text("<html>cached</html>", encoding="utf-8")
+
+    class NoNetwork:  # 通信しようとしたら失敗させる
+        def get(self, *a, **k):
+            raise AssertionError("network used")
+
+    html, used, status = fetch(NoNetwork(), "JP1A", html_dir, 0, cache_dir)
+    assert html == "<html>cached</html>" and status == "cache" and (html_dir / "JP1A.html").exists()

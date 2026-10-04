@@ -78,18 +78,26 @@ def extract(html: str) -> dict:
     return out
 
 
-# 作業: 1 件の HTML を取得する。保存済みならそれを使い、なければ通信して保存する。
-def fetch(session: requests.Session, pid: str, html_dir: Path, delay: float):
+# 作業: 1 件の HTML を取得する。調査フォルダにあればそれを使い、
+# なければ共有キャッシュ(cache_dir)から複写し、それもなければ通信して両方に保存する。
+def fetch(session: requests.Session, pid: str, html_dir: Path, delay: float, cache_dir: Path | None = None):
     """(html, 使った ID, HTTP 状態) を返す。ID は 末尾の種別コードを外した候補も試す。"""
     for cand in dict.fromkeys([pid, re.sub(r"[A-Z]\d?$", "", pid)]):
         path = html_dir / f"{cand}.html"
+        cached = Path(cache_dir) / f"{cand}.html" if cache_dir else None
         if path.exists():
+            return path.read_text(encoding="utf-8"), cand, "cache"
+        if cached and cached.exists():
+            path.write_text(cached.read_text(encoding="utf-8"), encoding="utf-8")
             return path.read_text(encoding="utf-8"), cand, "cache"
         time.sleep(delay)
         r = session.get(URL.format(id=cand), timeout=60, headers={"Accept-Language": "ja"})
         if r.status_code == 200:
             r.encoding = "utf-8"
             path.write_text(r.text, encoding="utf-8")
+            if cached:
+                cached.parent.mkdir(parents=True, exist_ok=True)
+                cached.write_text(r.text, encoding="utf-8")
             return r.text, cand, "200"
         status = str(r.status_code)
     return "", pid, status
@@ -109,10 +117,12 @@ def save_fulltext(text_dir: Path, pid: str, x: dict) -> Path:
     return path
 
 
-def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | None = None) -> pd.DataFrame:
+def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | None = None,
+        cache_dir: Path | None = None) -> pd.DataFrame:
     """文献番号の表(Google Patents ID(推定) 列を持つ)から取得・抽出し、結果の表を返す。
 
     text_dir を渡すと、全文を JSON で保存する(Excel のセル上限で切り詰められるため、LLM 評価にはこちらを使う)。
+    cache_dir を渡すと、調査をまたいで HTML を共有する(同じ特許を別の調査で再取得しない)。
     """
     html_dir = Path(html_dir)
     html_dir.mkdir(parents=True, exist_ok=True)
@@ -128,7 +138,7 @@ def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | N
             rec.update({"取得状況": "IDなし"})
         else:
             try:
-                html, used, status = fetch(sess, pid, html_dir, delay)
+                html, used, status = fetch(sess, pid, html_dir, delay, cache_dir)
             except requests.RequestException as e:
                 html, used, status = "", pid, f"error: {type(e).__name__}"
             rec.update({"使用ID": used, "取得状況": status})
