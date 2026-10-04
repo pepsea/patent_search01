@@ -25,23 +25,42 @@ EXCEL_CELL_MAX = 32000
 
 
 def _text(node) -> str:
-    return re.sub(r"[ \t　]+", " ", node.get_text("\n", strip=True)) if node else ""
+    """ブロック内のインライン要素(<u>, <sub> 等)は改行せず連結し、<br> だけを改行にする。"""
+    if node is None:
+        return ""
+    node = BeautifulSoup(str(node), "lxml")
+    for br in node.find_all("br"):
+        br.replace_with("\n")
+    text = node.get_text("")
+    lines = (re.sub(r"[ \t\u3000]+", " ", l).strip() for l in text.splitlines())
+    return "\n".join(l for l in lines if l)
+
+
+def _content(section):
+    """見出し(<h2>)を除いた本体。"""
+    return section.find(attrs={"itemprop": "content"}) or section if section else None
 
 
 def extract(html: str) -> dict:
     s = BeautifulSoup(html, "lxml")
     title = s.find(attrs={"itemprop": "title"}) or s.find("h1")
-    abstract = s.find("section", attrs={"itemprop": "abstract"}) or s.find(class_="abstract")
+    abstract = s.find("section", attrs={"itemprop": "abstract"})
     desc = s.find("section", attrs={"itemprop": "description"})
     claims_sec = s.find("section", attrs={"itemprop": "claims"})
-    claims = [_text(c) for c in claims_sec.find_all(class_="claim")] if claims_sec else []
-    if claims_sec and not claims:
-        claims = [_text(claims_sec)]
+    # 請求項は <li class="claim"> の中の <div class="claim" num="N"> が実体（li と div の二重取りを避ける）
+    claims = []
+    if claims_sec:
+        for c in claims_sec.find_all("div", class_="claim"):
+            claims.append(f"【請求項{c.get('num', len(claims) + 1)}】" + _text(c))
+    paras = []
+    if desc:
+        for p in desc.find_all(class_="description-paragraph"):
+            paras.append(f"[{p.get('num', '')}] " + _text(p) if p.get("num") else _text(p))
     out = {
-        "title": _text(title).replace(" - Google Patents", ""),
-        "abstract": _text(abstract),
+        "title": re.sub(r"\s+", " ", _text(title)).replace(" - Google Patents", ""),
+        "abstract": _text(_content(abstract)),
         "claims": "\n".join(claims),
-        "description": _text(desc),
+        "description": "\n".join(paras) or _text(_content(desc)),
         "claim_count": len(claims),
     }
     missing = [k for k in ("title", "abstract", "claims", "description") if not out[k]]
