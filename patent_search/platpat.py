@@ -1,7 +1,12 @@
-"""J-PlatPat「検索結果一覧(国内文献)」のコピーテキストを表に変換する。
+"""プログラム1: J-PlatPat「検索結果一覧(国内文献)」のコピーテキストを、重複のない表にする。
 
 J-PlatPat の画面は JavaScript で描画されるため、保存した HTML には表が入らない。
-結果一覧をコピーして貼り付けたテキストを読み、文献番号などを取り出す。
+そのため、結果一覧をコピーして貼り付けたテキスト(*.txt)を読む。
+
+作業の流れ:
+ 1. parse_text      : テキストを 1 件ずつ(No. の連番を目印に)区切り、各項目に振り分ける
+ 2. google_patent_id: 文献番号から Google Patents の ID 候補(例: JP2017080742A)を作る
+ 3. build_list      : フォルダ内の全 txt を読み、文献番号で重複を除いた一覧(DataFrame)にまとめる
 """
 
 from __future__ import annotations
@@ -52,6 +57,7 @@ class PatentRow:
         return d
 
 
+# 作業: 文献番号(特開・特表・特許・実登・再表 など)を Google Patents の ID 候補に変換する。
 def google_patent_id(doc_no: str) -> str:
     """文献番号から Google Patents の ID 候補を作る（種別コードは推定）。
 
@@ -60,7 +66,9 @@ def google_patent_id(doc_no: str) -> str:
     m = DOC_RE.match(doc_no)
     if not m:
         return ""
-    if m["kind"] == "再表":  # 例: 再表2015/072306 -> JPWO2015072306A1, 再表92/019759 -> JPWO1992019759A1
+    # 再表(国際出願の再公表)は特殊な形式にする。
+    # 例: 再表2015/072306 -> JPWO2015072306A1, 再表92/019759 -> JPWO1992019759A1
+    if m["kind"] == "再表":
         y, n = m["body"].split("/")
         y = y if len(y) == 4 else ("19" if int(y) >= 50 else "20") + y
         return f"JPWO{y}{n}A1"
@@ -73,6 +81,7 @@ def _is_status_line(line: str) -> bool:
     return line.startswith(STATUS_STARTS)
 
 
+# 作業: コピーテキスト全体を 1 件ごとに区切って PatentRow のリストにする。
 def parse_text(text: str) -> list[PatentRow]:
     lines = [l.strip() for l in text.splitlines()]
     lines = [l for l in lines if l]
@@ -94,12 +103,14 @@ def parse_text(text: str) -> list[PatentRow]:
     for k, s in enumerate(starts):
         e = starts[k + 1] if k + 1 < len(starts) else len(body)
         chunk = body[s + 1:e]
-        if k + 1 == len(starts):  # 末尾のフッタを除去
+        # 最後の 1 件だけ、末尾の著作権表示などのフッタ行を取り除く
+        if k + 1 == len(starts):
             chunk = [l for l in chunk if not l.startswith(("Copyright", "(P"))]
         rows.append(_parse_record(k + 1, chunk))
     return rows
 
 
+# 作業: 1 件分の行(文献番号、出願番号、日付、名称、出願人、ステータス、FI)を各項目に振り分ける。
 def _parse_record(no: int, chunk: list[str]) -> PatentRow:
     r = PatentRow(no=no)
     if len(chunk) < 6:
@@ -129,6 +140,7 @@ def _parse_record(no: int, chunk: list[str]) -> PatentRow:
     return r
 
 
+# 作業: 1 つの txt ファイルを読んで parse_text に渡す。
 def load_file(path: str | Path) -> list[PatentRow]:
     return parse_text(Path(path).read_text(encoding="utf-8"))
 
@@ -169,7 +181,8 @@ def build_list(folder: str | Path, pattern: str = "*.txt"):
     if not files:
         raise FileNotFoundError(f"{folder} に {pattern} が見つかりません")
     per_file, kept, sources, conflicts = [], {}, {}, []
-    for f in files:  # 古い順に処理し、後勝ち（新しいファイルが優先）
+    # 古いファイルから順に処理し、同じ文献番号は後(=新しいファイル)の内容で上書きする
+    for f in files:
         rows = parse_text(read_text_file(f))
         per_file.append({"ファイル": f.name, "読み取り件数": len(rows),
                          "警告あり": sum(bool(r.warnings) for r in rows)})

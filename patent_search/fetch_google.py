@@ -1,4 +1,10 @@
-"""文献番号の表(Excel)から Google Patents(日本語ページ)のHTMLを取得し、本文を抽出して Excel に出力する。
+"""プログラム2: 文献番号の表から Google Patents(日本語ページ)の HTML を取得し、本文を抽出して保存する。
+
+作業の流れ:
+ 1. fetch         : 1 件分の URL にアクセスして HTML を取得し、results/html/ に保存する(取得済みは再利用)
+ 2. extract       : HTML から、名称・要約・請求項・明細書(段落番号つき)を取り出す
+ 3. save_fulltext : 全文を切り詰めずに JSON で保存する(原文と、全角を半角に揃えた NFKC 版)
+ 4. run           : 上の 1〜3 を表の全行に対して繰り返し、結果の表(Excel 出力用)を返す
 
 python -m patent_search.fetch_google IN.xlsx OUT.xlsx [--html-dir results/html] [--limit N] [--delay 3]
 
@@ -38,11 +44,13 @@ def _text(node) -> str:
     return "\n".join(l for l in lines if l)
 
 
+# 作業: <section> から見出し(<h2>)を除いた本体部分だけを返す。
 def _content(section):
     """見出し(<h2>)を除いた本体。"""
     return section.find(attrs={"itemprop": "content"}) or section if section else None
 
 
+# 作業: Google Patents のページ構造(itemprop 属性)から、名称・要約・請求項・明細書を取り出す。
 def extract(html: str) -> dict:
     s = BeautifulSoup(html, "lxml")
     title = s.find(attrs={"itemprop": "title"}) or s.find("h1")
@@ -70,6 +78,7 @@ def extract(html: str) -> dict:
     return out
 
 
+# 作業: 1 件の HTML を取得する。保存済みならそれを使い、なければ通信して保存する。
 def fetch(session: requests.Session, pid: str, html_dir: Path, delay: float):
     """(html, 使った ID, HTTP 状態) を返す。ID は 末尾の種別コードを外した候補も試す。"""
     for cand in dict.fromkeys([pid, re.sub(r"[A-Z]\d?$", "", pid)]):
@@ -130,7 +139,8 @@ def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | N
                             "明細書": x["description"], "明細書文字数": len(x["description"]),
                             "名称(正規化)": nfkc(x["title"]), "全文ファイル": str(save_fulltext(text_dir, used, x)),
                             "抽出状況": x["extract_status"]})
-                if len(x["description"]) > EXCEL_CELL_MAX:  # Excel のセル上限対策。全文は HTML 側にある
+                # Excel のセルは約 3 万 2 千文字までなので、超える分は切り詰める(全文は JSON と HTML に残る)
+                if len(x["description"]) > EXCEL_CELL_MAX:
                     rec["明細書"] = x["description"][:EXCEL_CELL_MAX]
                     rec["抽出状況"] += " / 明細書を切り詰め(全文は全文ファイル)"
                 if len(x["claims"]) > EXCEL_CELL_MAX:

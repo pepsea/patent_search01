@@ -1,4 +1,11 @@
-"""特許本文と「調べたいこと」の関連性を、ローカル LLM で評価する（ステップ3）。
+"""プログラム3: 特許本文と「調べたいこと」の関連性を、ローカル LLM で評価する。
+
+作業の流れ:
+ 1. keyword_snippets: 本文から、調べたいことの関連語の周辺を抜粋する(本文が長いため)
+ 2. build_prompt    : 調べたいこと + 判定基準 + 特許の本文(抜粋)から、LLM に渡す文章を作る
+ 3. バックエンド    : ollama_backend(この PC) / guidance_backend(サーバー)で LLM に判定させる
+ 4. check_evidence  : LLM が出した「根拠の引用」が原文に実在するかを確認する
+ 5. evaluate_table  : 上を全件に繰り返し、関連度の高い順の結果表を返す
 
 - 判定結果は JSON スキーマで制約する（Ollama: format 指定 / Hugging Face: guidance の json 文法）。
   どちらのバックエンドでも同じプロンプト・同じスキーマなので、サーバー移植時はバックエンドだけ差し替える。
@@ -96,6 +103,7 @@ def _keyword_patterns(keywords: list[str]) -> list[re.Pattern]:
     return pats
 
 
+# 作業: 関連語の前後を抜粋する。近い箇所は 1 つにまとめ、全ヒット数も返す。
 def keyword_snippets(text: str, keywords: list[str], width: int = 150, max_snippets: int = 8) -> tuple[list[str], int]:
     """関連語の前後 width 文字を抜粋する(重なる範囲は結合)。(抜粋, 全ヒット数) を返す。"""
     if not keywords:
@@ -111,6 +119,7 @@ def keyword_snippets(text: str, keywords: list[str], width: int = 150, max_snipp
     return [text[a:b].replace("\n", " ") for a, b in spans[:max_snippets]], len(hits)
 
 
+# 作業: 調べたいこと・判定基準・特許本文を、1 つのプロンプトに組み立てる。
 def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) -> tuple[str, int]:
     """rec は全文JSON(*_nfkc キーを使う)。max_chars で本文の長さを抑える。(プロンプト, 関連語ヒット数)"""
     desc = rec["description_nfkc"]
@@ -128,6 +137,7 @@ def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) ->
 
 # ---- バックエンド: (system, user, schema) -> JSON 文字列 -------------------------------
 
+# 作業: Ollama(この PC)に問い合わせる関数を作る。出力は JSON スキーマで制約される。
 def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434", num_ctx: int = 8192) -> Callable:
     import requests
 
@@ -143,6 +153,7 @@ def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434
     return run
 
 
+# 作業: guidance(Hugging Face のモデル、サーバー用)に問い合わせる関数を作る。出力は JSON 文法で制約される。
 def guidance_backend(lm) -> Callable:
     """lm: guidance のモデル。例: guidance.models.Transformers("Qwen/Qwen3-14B", device_map="auto")。"""
     from guidance import assistant, system as system_role, user as user_role
@@ -163,6 +174,7 @@ def guidance_backend(lm) -> Callable:
 
 # ---- 評価 ----------------------------------------------------------------------------
 
+# 作業: LLM の引用が、原文(全角半角・空白の違いを無視)に含まれるかを確認する。
 def check_evidence(evidence: list[str], source: str) -> str:
     """引用が原文(NFKC・空白除去)に含まれるかを確認する。"""
     norm = lambda s: re.sub(r"\s+", "", nfkc(s))
@@ -173,6 +185,7 @@ def check_evidence(evidence: list[str], source: str) -> str:
     return "全て原文に存在" if ok == len(evidence) else f"原文に無い引用あり({len(evidence) - ok}/{len(evidence)})"
 
 
+# 作業: 1 件を評価する(プロンプト作成 → LLM → JSON の読み取り → 引用の検証)。
 def evaluate_one(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) -> dict:
     prompt, hits = build_prompt(topic, doc_no, rec, max_chars)
     try:
@@ -204,7 +217,8 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         rec = json.loads(path.read_text(encoding="utf-8"))
         try:
             o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars)
-        except Exception as e:  # 接続断など。1件の失敗で全体を止めない
+        # 接続断などでも、1 件の失敗で全体を止めず、失敗として記録して次へ進む
+        except Exception as e:
             o = {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "evidence": [],
                  "evidence_check": "", "keyword_hits": None}
         rows.append({**base, "関連度(0-3)": o["score"], "判定": o["judgement"], "理由": o["reason"],
