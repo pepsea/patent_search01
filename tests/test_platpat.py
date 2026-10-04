@@ -84,3 +84,28 @@ def test_google_id():
     assert google_patent_id("再表2015/072306") == "JPWO2015072306A1"
     assert google_patent_id("再表92/019759") == "JPWO1992019759A1"
     assert google_patent_id("不明") == ""
+
+
+def _rec(no, doc, app, status="審査中\n公開公報の発行", title="名称"):
+    return f"{no}\n\n{doc}\n\n{app}\n\n2025/01/01\n\n2025/07/01\n\n{title}\n\n出願人\n\n{status}\n\nA01B1/00\n\n"
+
+
+def test_build_list_dedup_newest_wins_and_flags(tmp_path):
+    import os
+
+    from patent_search.platpat import build_list
+
+    head = "検索結果一覧(国内文献)\nFI\n"
+    old = tmp_path / "a.txt"
+    new = tmp_path / "b.txt"
+    old.write_text(head + _rec(1, "特開2025-000001", "特願2024-1") + _rec(2, "特開2025-000002", "特願2024-2"), encoding="utf-8")
+    new.write_text((head + _rec(1, "特開2025-000001", "特願2024-1", "特許 有効\n登録公報の発行")
+                    + _rec(2, "特許7000001", "特願2024-2")).encode("cp932").decode("cp932"), encoding="cp932")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (2000, 2000))
+    df, rep = build_list(tmp_path)
+    assert rep["total_rows"] == 4 and rep["unique"] == 3 and rep["duplicates_removed"] == 1  # cp932 も読める
+    row = df[df["文献番号"] == "特開2025-000001"].iloc[0]
+    assert row["ステータス"].startswith("特許 有効") and row["出典ファイル"] == "a.txt ; b.txt"  # 新しいファイルを採用
+    assert len(rep["conflicts"]) == 1
+    assert df[df["文献番号"] == "特許7000001"].iloc[0]["同一出願番号の別文献"] == "特開2025-000002"  # 除かず注記する

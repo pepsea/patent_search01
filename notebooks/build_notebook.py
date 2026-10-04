@@ -13,7 +13,8 @@ SETTINGS = '''from pathlib import Path
 import json
 
 # ================= 手順1・2 =================
-INPUT_TXT = "patent_data1.txt"          # J-PlatPat 結果一覧のコピーテキスト
+INPUT_DIR = "../data"                   # J-PlatPat 結果一覧のコピーテキスト(*.txt)を入れたフォルダ。複数可
+INPUT_PATTERN = "*.txt"
 NUMBERS_XLSX = "results/patent_numbers.xlsx"   # 手順1の出力
 RESULT_XLSX = "results/patents_text.xlsx"      # 手順2の出力
 HTML_DIR = "results/html"               # 取得した生 HTML の保存先（再実行時は取得済みを飛ばす）
@@ -61,18 +62,10 @@ Path("results").mkdir(exist_ok=True)'''
 
 STEP1_RUN = '''import pandas as pd
 
-rows = load_file(INPUT_TXT)
-COLUMNS = {
-    "no": "No.", "doc_no": "文献番号", "app_no": "出願番号", "filing_date": "出願日",
-    "publication_date": "公知日", "title": "発明の名称", "applicant": "出願人/権利者",
-    "applicant_has_more": "出願人(他あり)", "status": "ステータス", "fi": "FI",
-    "fi_has_more": "FI(他あり)", "google_patent_id": "Google Patents ID(推定)",
-    "google_patent_url": "Google Patents URL(推定)", "warnings": "警告",
-}
-numbers = pd.DataFrame([r.to_dict() for r in rows])[list(COLUMNS)].rename(columns=COLUMNS)
+numbers, report = build_list(INPUT_DIR, INPUT_PATTERN)
 numbers.to_excel(NUMBERS_XLSX, index=False)
-print(f"{len(numbers)} 件 -> {NUMBERS_XLSX} / 警告あり {int((numbers['警告'] != '').sum())} 件")
-numbers.head(10)'''
+print(f"読み取り合計 {report['total_rows']} 件 -> 重複除去後 {report['unique']} 件（除去 {report['duplicates_removed']} 件）-> {NUMBERS_XLSX}")
+report["files"]  # ファイルごとの読み取り件数（0件のファイルは書式が違う可能性）'''
 
 BACKEND_CELL = '''if BACKEND == "ollama":
     backend = ollama_backend(OLLAMA_MODEL, num_ctx=OLLAMA_NUM_CTX)
@@ -89,7 +82,7 @@ print(prompt)  # LLM に渡る実際のプロンプト（本文は1件目の例�
 md, code = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
 cells = [
     md("# 特許調査パイプライン（ステップ1〜3）\n"
-       "1. J-PlatPat の検索結果一覧（コピーしたテキスト）から文献番号表を作る\n"
+       "1. 指定フォルダ内の J-PlatPat 検索結果一覧（コピーしたテキスト、複数可）を統合し、重複を除いた文献番号表を作る\n"
        "2. 文献番号から Google Patents（日本語ページ）の HTML を取得し、名称・要約・請求項・明細書を Excel に出力する\n"
        "3. ローカル LLM で、各特許が「調べたいこと」に関連するかを評価して表にする\n\n"
        "**使い方**: 上から順に実行。まず設定セルの値を変更し、手順2・3は `LIMIT` / `EVAL_LIMIT = 3` などで少数件を試してから全件にしてください。\n\n"
@@ -101,7 +94,11 @@ cells = [
     code(platpat),
     md("## 手順1: 実行"),
     code(STEP1_RUN),
-    code("numbers[numbers['警告'] != ''][['No.', '文献番号', '警告']]  # 読み取れなかった行（空なら問題なし）"),
+    md("同じ文献番号でファイル間に内容の違い（ステータス更新など）があった行です。新しいファイルの内容を採用しています。"),
+    code("report['conflicts']"),
+    md("読み取れなかった行（空なら問題なし）と、同じ出願番号で文献番号が違う行（公開公報と登録公報など。除外はしていません）。"),
+    code("numbers[numbers['警告'] != ''][['No.', '文献番号', '警告']]"),
+    code("numbers[numbers['同一出願番号の別文献'] != ''][['文献番号', '出願番号', '同一出願番号の別文献']]"),
     md("## 手順2: Google Patents から取得・抽出（コード）"),
     code(fetch_src),
     md("## 手順2: 実行\nまず `LIMIT = 3` 程度で、取得状況・抽出状況を確認してください。"),

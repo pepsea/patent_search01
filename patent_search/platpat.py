@@ -131,3 +131,69 @@ def _parse_record(no: int, chunk: list[str]) -> PatentRow:
 
 def load_file(path: str | Path) -> list[PatentRow]:
     return parse_text(Path(path).read_text(encoding="utf-8"))
+
+
+# ---- フォルダ内の複数ファイルを統合し、重複を除いた一覧を作る ------------------------------------
+
+LIST_COLUMNS = {
+    "no": "No.", "doc_no": "文献番号", "app_no": "出願番号", "filing_date": "出願日",
+    "publication_date": "公知日", "title": "発明の名称", "applicant": "出願人/権利者",
+    "applicant_has_more": "出願人(他あり)", "status": "ステータス", "fi": "FI",
+    "fi_has_more": "FI(他あり)", "google_patent_id": "Google Patents ID(推定)",
+    "google_patent_url": "Google Patents URL(推定)", "warnings": "警告",
+}
+
+
+def read_text_file(path: Path) -> str:
+    """UTF-8(BOM可)で読み、失敗したら Shift_JIS(cp932)で読む。"""
+    raw = Path(path).read_bytes()
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def build_list(folder: str | Path, pattern: str = "*.txt"):
+    """folder 内の pattern に合う全ファイルを読み、文献番号で重複を除いた一覧を作る。
+
+    戻り値: (一覧 DataFrame, 報告 dict)
+    - 同じ文献番号が複数のファイルにある場合は、更新日時が新しいファイルの行を採用する
+      （ステータスは時間とともに変わるため）。出典は「出典ファイル」列に全て残す。
+    - 同じ出願番号で文献番号が異なる行(公開公報と登録公報など)は除かず、「同一出願番号の別文献」列で示す。
+    """
+    import pandas as pd
+
+    files = sorted(Path(folder).glob(pattern), key=lambda p: (p.stat().st_mtime, p.name))
+    if not files:
+        raise FileNotFoundError(f"{folder} に {pattern} が見つかりません")
+    per_file, kept, sources, conflicts = [], {}, {}, []
+    for f in files:  # 古い順に処理し、後勝ち（新しいファイルが優先）
+        rows = parse_text(read_text_file(f))
+        per_file.append({"ファイル": f.name, "読み取り件数": len(rows),
+                         "警告あり": sum(bool(r.warnings) for r in rows)})
+        for r in rows:
+            if r.doc_no in kept and (kept[r.doc_no].status != r.status or kept[r.doc_no].title != r.title):
+                conflicts.append({"文献番号": r.doc_no, "採用ファイル": f.name,
+                                  "旧ステータス": " / ".join(kept[r.doc_no].status), "新ステータス": " / ".join(r.status)})
+            kept[r.doc_no] = r
+            sources.setdefault(r.doc_no, [])
+            if f.name not in sources[r.doc_no]:
+                sources[r.doc_no].append(f.name)
+    recs = []
+    for doc_no, r in kept.items():
+        d = r.to_dict()
+        d["source_files"] = " ; ".join(sources[doc_no])
+        recs.append(d)
+    df = pd.DataFrame(recs)
+    same_app = df.groupby("app_no")["doc_no"].apply(list)
+    df["same_app_docs"] = [" ; ".join(x for x in same_app[a] if x != d) for a, d in zip(df["app_no"], df["doc_no"])]
+    df = df.sort_values("publication_date", ascending=False, kind="stable").reset_index(drop=True)
+    df["no"] = range(1, len(df) + 1)
+    out = df[list(LIST_COLUMNS) + ["source_files", "same_app_docs"]].rename(
+        columns={**LIST_COLUMNS, "source_files": "出典ファイル", "same_app_docs": "同一出願番号の別文献"})
+    total = sum(p["読み取り件数"] for p in per_file)
+    report = {"files": pd.DataFrame(per_file), "total_rows": total, "unique": len(out),
+              "duplicates_removed": total - len(out), "conflicts": pd.DataFrame(conflicts)}
+    return out, report
