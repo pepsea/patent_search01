@@ -3,8 +3,8 @@
 作業の流れ:
  1. make_run_dir     : 「トピック名_日時」のフォルダ(中に html/ text/ input/)を作る。既存のフォルダを指定すれば続きから使う
  2. register_inputs  : 入力の txt を、調査フォルダの input/ にコピーして残す
- 3. save_run_settings: 調べたいこと・LLM・件数などの設定を、調査フォルダの「フォルダ名_run_settings.json」に保存する
- 4. run_file         : 調査フォルダ内のファイルの場所を、「フォルダ名_種類.xlsx」の形で作る(例: TOTAL-RNA-seq_20261004_153005_evaluation.xlsx)
+ 3. save_run_settings: 調べたいこと・LLM・件数などの設定を、調査フォルダの run_settings.json に保存する
+ 4. run_file         : 調査フォルダ内のファイルの場所を作る(例: 調査フォルダ/evaluation.xlsx。ファイル名にトピック名は使わない)
 """
 
 from __future__ import annotations
@@ -57,10 +57,10 @@ def register_inputs(run_dir: Path, input_dir: str | Path, pattern: str = "*.txt"
     return copied
 
 
-# 作業: 調査フォルダの中に置くファイルの場所を作る。ファイル名は「フォルダ名_種類.拡張子」にする
-# (フォルダ名=トピック名_日時なので、ファイルだけを取り出しても、どの調査のものか分かる)。
+# 作業: 調査フォルダの中に置くファイルの場所を作る。ファイル名はトピック名を含めず「種類.拡張子」にする
+# (トピック名と日時は、調査フォルダの名前だけに使う)。
 def run_file(run_dir: Path, kind: str, ext: str = "xlsx") -> Path:
-    return Path(run_dir) / f"{Path(run_dir).name}_{kind}.{ext}"
+    return Path(run_dir) / f"{kind}.{ext}"
 
 
 # 作業: 設定を JSON で保存する(日付・パスなどの文字以外の値も文字にして保存する)。

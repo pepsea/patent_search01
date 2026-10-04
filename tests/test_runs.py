@@ -41,6 +41,8 @@ def test_register_inputs_and_settings(tmp_path):
     d = make_run_dir(tmp_path / "res", "T", now=NOW)
     assert register_inputs(d, src) == ["a.txt"] and (d / "input" / "a.txt").exists()
     saved = save_run_settings(d, {"トピック名": "T", "件数": None})
-    assert saved.name == f"{d.name}_run_settings.json" and run_file(d, "evaluation").name == f"{d.name}_evaluation.xlsx"
+    # ファイル名にトピック名は使わない(トピック名と日時はフォルダ名だけ)
+    assert saved.name == "run_settings.json" and run_file(d, "evaluation").name == "evaluation.xlsx"
+    assert run_file(d, "evaluation").parent == d
     data = json.loads(saved.read_text(encoding="utf-8"))
     assert data["トピック名"] == "T" and "作成日時" in data

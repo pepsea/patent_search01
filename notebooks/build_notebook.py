@@ -97,13 +97,13 @@ RUN_CELL = '''# 調査フォルダ「トピック名_日時」を作る(RUN_DIR 
 run_dir = make_run_dir(RESULTS_ROOT, TOPIC_NAME, RUN_DIR)
 # 入力の txt を、調査フォルダの input/ にコピーして残す。
 copied = register_inputs(run_dir, INPUT_DIR, INPUT_PATTERN)
-# 以降のセルが使う出力先を、すべて調査フォルダの中に決める。ファイル名は「フォルダ名_種類.xlsx」にする。
+# 以降のセルが使う出力先を、すべて調査フォルダの中に決める(ファイル名にトピック名は使わない)。
 NUMBERS_XLSX = run_file(run_dir, "patent_numbers")
 RESULT_XLSX = run_file(run_dir, "patents_text")
 HTML_DIR = run_dir / "html"
 TEXT_DIR = run_dir / "text"
 RESULT_EVAL_XLSX = run_file(run_dir, "evaluation")
-# 今回の設定を「フォルダ名_run_settings.json」に保存する(後から、何を調べたかを確認できる)。
+# 今回の設定を run_settings.json に保存する(後から、何を調べたかを確認できる)。
 save_run_settings(run_dir, {
     "トピック名": TOPIC_NAME, "定義": TOPIC_DEFINITION, "関連語": TOPIC_KEYWORDS,
     "含める条件": TOPIC_INCLUDE, "除外する条件": TOPIC_EXCLUDE,
@@ -197,8 +197,8 @@ cells = [
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 make_run_dir などができる)"),
     code(runs_src),
     explain("調査フォルダの作成",
-            "設定のトピック名と現在の日時で調査フォルダを作り、入力の txt を input/ にコピーし、設定を「フォルダ名_run_settings.json」に保存する。"
-            "以降の出力は、すべてこのフォルダの中に入る(html/ text/ と、「フォルダ名_patent_numbers.xlsx」「フォルダ名_patents_text.xlsx」「フォルダ名_evaluation.xlsx」)",
+            "設定のトピック名と現在の日時で調査フォルダを作り、入力の txt を input/ にコピーし、設定を run_settings.json に保存する。"
+            "以降の出力は、すべてこのフォルダの中に入る(html/ text/ patent_numbers.xlsx patents_text.xlsx evaluation.xlsx)",
             "設定のトピック名・RUN_DIR・各設定、INPUT_DIR の txt", "調査フォルダ、run_dir、各出力ファイルの場所(NUMBERS_XLSX など)"),
     code(RUN_CELL),
     md("## 手順1: 文献番号の一覧を作る"),
@@ -209,7 +209,7 @@ cells = [
     code(platpat),
     explain("手順1の実行: 一覧の作成",
             "設定したフォルダの全 txt を読み、重複を除いた文献番号の一覧を作って Excel に保存する",
-            "設定の INPUT_DIR 内の txt", "numbers(一覧)、report(報告)、調査フォルダ内の「フォルダ名_patent_numbers.xlsx」"),
+            "設定の INPUT_DIR 内の txt", "numbers(一覧)、report(報告)、調査フォルダ内の patent_numbers.xlsx"),
     code(STEP1_RUN),
     explain("確認: ファイル間で内容が違った行",
             "同じ文献番号でファイル間にステータス等の違いがあった行を表示する。新しいファイルの内容を採用済み",
@@ -232,7 +232,7 @@ cells = [
     code(fetch_src),
     explain("手順2の実行: 取得と抽出",
             "一覧の先頭から LIMIT 件について、HTML を取得し本文を抽出して Excel に保存する。取得済みの HTML は再利用する",
-            "numbers、設定の LIMIT・DELAY", "result(表)、調査フォルダ内の「フォルダ名_patents_text.xlsx」、html/、text/(共有キャッシュにも HTML を保存)"),
+            "numbers、設定の LIMIT・DELAY", "result(表)、調査フォルダ内の patents_text.xlsx、html/、text/(共有キャッシュにも HTML を保存)"),
     code(STEP2_RUN),
     explain("確認: 取得・抽出に失敗した行",
             "取得状況が 200 / cache 以外、または抽出状況が OK 以外の行を表示する",
@@ -253,7 +253,7 @@ cells = [
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
             "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
-            "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の「フォルダ名_evaluation.xlsx」"),
+            "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
 ]
 nb = nbf.v4.new_notebook(cells=cells)
