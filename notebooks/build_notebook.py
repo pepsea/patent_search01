@@ -81,6 +81,8 @@ HF_MODEL_ID = "Qwen/Qwen3-14B"
 MAX_CHARS = 6000
 # True なら、手順3で LLM が生成している様子を、画面にリアルタイムで表示する。
 STREAM = True
+# True なら、手順3で LLM に渡すプロンプト(システム・ユーザー)も、1 件ごとに画面に表示する。長いので、確認が済んだら False にする。
+SHOW_PROMPT = True
 # 手順3で評価する件数。まず 3 で試し、問題なければ None(全件)にする。
 EVAL_LIMIT = 3
 
@@ -165,8 +167,9 @@ result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状
 
 STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
-# LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら、生成の様子がリアルタイムで表示される。
-evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES, stream=STREAM)
+# LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら生成の様子が、SHOW_PROMPT が True ならプロンプトも、1 件ごとに画面に表示される。
+evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES,
+                       stream=STREAM, show_prompt=SHOW_PROMPT)
 # 結果を Excel に保存する(文献番号をクリックで Google Patents が開く。列と順番は固定)。
 save_evaluation_excel(evaluation, RESULT_EVAL_XLSX)
 print('->', RESULT_EVAL_XLSX)
@@ -265,7 +268,7 @@ cells = [
             "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
+            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の SHOW_PROMPT が True なら、LLM に渡すプロンプト（システム・ユーザー）を 1 件ごとに表示し、STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
     explain("文字化けの診断（必要なときだけ実行）",

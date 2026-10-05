@@ -277,6 +277,7 @@ def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434
                 last = e
         raise ValueError(f"JSON を得られませんでした: {last}")
 
+    run.extra_prompt = "" if mode == "schema" else FORMAT_NOTE  # ユーザープロンプトの末尾に足される文(画面表示用)
     return run
 
 
@@ -431,9 +432,9 @@ def company_name(applicant, aliases: dict | None = None) -> str:
 
 
 # 作業: 文献番号表の各行を、全文 JSON(text_dir/{ID}.json)で評価し、FINAL_COLUMNS の順の結果表を返す。
-# stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。
+# stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。show_prompt=True なら、LLM に渡すプロンプトも、1 件ごとに画面に出す。
 def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None,
-                   stream: bool = False):
+                   stream: bool = False, show_prompt: bool = False):
     from pathlib import Path
 
     import pandas as pd
@@ -455,8 +456,12 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         jp_url = r.get("J-PlatPat URL")
         if rec.get("source") == "csv_abstract" and isinstance(jp_url, str) and jp_url:
             base["リンク"] = jp_url
-        if stream:  # 生成の様子を、1 語ずつ画面に出す
+        if stream or show_prompt:
             print(f"\n━━ {r['文献番号']}  {r.get('発明の名称') or ''}", flush=True)
+        if show_prompt:  # LLM に実際に渡す文章(バックエンドが足す出力形式の指示も含む)
+            shown_prompt, _ = build_prompt(topic, r["文献番号"], rec, max_chars)
+            print(f"\n【システムプロンプト】\n{SYSTEM}\n\n【ユーザープロンプト】\n{shown_prompt}{getattr(backend, 'extra_prompt', '')}"
+                  f"\n\n【LLM の生成】", flush=True)
         try:
             o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars,
                              on_token=(lambda t: print(t, end="", flush=True)) if stream else None)
@@ -469,7 +474,7 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         rows.append({**base, "関連度": o["score"], "判定": o["judgement"], "理由": o["reason"],
                      "根拠の引用": " / ".join(o["evidence"]), "引用の検証": o["evidence_check"],
                      "関連語ヒット数": o["keyword_hits"], "発明内容概要": summary})
-        print(("\n→ " if stream else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
+        print(("\n→ " if (stream or show_prompt) else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
     df = pd.DataFrame(rows)
     for c in FINAL_COLUMNS + ["リンク"]:
         if c not in df:

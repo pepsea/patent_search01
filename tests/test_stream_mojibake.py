@@ -193,3 +193,23 @@ def test_diagnose_ollama_reports_garble(monkeypatch, capsys):
     screen = capsys.readouterr().out
     assert screen.count("文字化けの疑い: なし") == 2 and screen.count("文字化けの疑い: あり") == 1
     assert "補正後: 全RNAは（文字化け）です" in screen
+
+
+def test_evaluate_table_shows_prompt_with_backend_note(capsys, tmp_path, monkeypatch):
+    import requests
+
+    (tmp_path / "JP1A.json").write_text(json.dumps(REC), encoding="utf-8")
+    nums = pd.DataFrame([{"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "発明の名称": "名称A"}])
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse([json.dumps(GOOD, ensure_ascii=False)]))
+    backend = ollama_backend(mode="none")
+    evaluate_table(backend, TOPIC, nums, tmp_path, stream=True, show_prompt=True)
+    screen = capsys.readouterr().out
+    # システム → ユーザー(調べたいこと・特許本文・出力形式の指示) → 生成の順に表示される
+    i, j, k = screen.index("【システムプロンプト】"), screen.index("【ユーザープロンプト】"), screen.index("【LLM の生成】")
+    assert i < j < k and "あなたは特許調査の専門家" in screen and "# 調査テーマ\nTOTAL-RNA-seq" in screen
+    assert "# 出力形式" in screen and '"score"' in screen[k:]
+    # 構造化出力(schema)では、出力形式の指示は足されない
+    assert ollama_backend(mode="schema").extra_prompt == ""
+    # show_prompt=False なら出さない
+    evaluate_table(backend, TOPIC, nums, tmp_path, stream=True)
+    assert "【ユーザープロンプト】" not in capsys.readouterr().out
