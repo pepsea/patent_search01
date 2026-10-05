@@ -112,3 +112,28 @@ def test_abstract_only_prompt_and_reason():
                                              "evidence": ["total RNA を解析する方法"]})
     out = evaluate_one(fake, TOPIC, "特開X", ABS_ONLY)
     assert out["reason"] == "【要約のみで判定】r" and out["evidence_check"] == "全て原文に存在"
+
+
+def test_link_switches_to_jplatpat_for_abstract_substituted_rows(tmp_path):
+    from openpyxl import load_workbook
+
+    from patent_search.evaluate import evaluate_table, save_evaluation_excel
+
+    (tmp_path / "JP1A.json").write_text(json.dumps({**ABS_ONLY, "source": "csv_abstract"}), encoding="utf-8")
+    web = {"title_nfkc": "t", "abstract_nfkc": "a", "claims_nfkc": "c", "description_nfkc": "d", "source": "web"}
+    (tmp_path / "JP2A.json").write_text(json.dumps(web), encoding="utf-8")
+    g = "https://patents.google.com/patent/{}/ja"
+    nums = pd.DataFrame([
+        {"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "Google Patents URL(推定)": g.format("JP1A"), "J-PlatPat URL": "https://jplatpat/1"},
+        {"文献番号": "特開2", "Google Patents ID(推定)": "JP2A", "Google Patents URL(推定)": g.format("JP2A"), "J-PlatPat URL": "https://jplatpat/2"},
+        {"文献番号": "特開3", "Google Patents ID(推定)": "JP3A", "Google Patents URL(推定)": g.format("JP3A"), "J-PlatPat URL": "https://jplatpat/3"},
+    ])
+    fake = lambda s, u, schema: json.dumps({"score": 1, "judgement": "わずかに関連", "reason": "r", "summary": "s", "evidence": []})
+    df = evaluate_table(fake, TOPIC, nums, tmp_path)
+    links = dict(zip(df["文献番号"], df["リンク"]))
+    assert links["特開1"] == "https://jplatpat/1"           # 要約で代用 → J-PlatPat
+    assert links["特開2"] == g.format("JP2A")               # Web の本文あり → Google Patents のまま
+    assert links["特開3"] == g.format("JP3A")               # 本文なし(未取得) → そのまま
+    save_evaluation_excel(df, tmp_path / "o.xlsx")
+    ws = load_workbook(tmp_path / "o.xlsx")["評価結果"]
+    assert {ws.cell(row=i, column=1).value: ws.cell(row=i, column=1).hyperlink.target for i in (2, 3, 4)}["特開1"] == "https://jplatpat/1"

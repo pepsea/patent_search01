@@ -273,6 +273,10 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
             rows.append({**base, "判定": "本文なし(未取得)"})
             continue
         rec = json.loads(path.read_text(encoding="utf-8"))
+        # 要約で代用した行は Google Patents のページが無い(404 など)ので、リンクを J-PlatPat の URL に替える
+        jp_url = r.get("J-PlatPat URL")
+        if rec.get("source") == "csv_abstract" and isinstance(jp_url, str) and jp_url:
+            base["リンク"] = jp_url
         try:
             o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars)
         # 接続断などでも、1 件の失敗で全体を止めず、失敗として記録して次へ進む
@@ -293,7 +297,7 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
     return df[FINAL_COLUMNS + ["リンク"]].reset_index(drop=True)
 
 
-# 作業: 結果表を Excel に保存する。文献番号をクリックで Google Patents が開くリンクにし、見やすく整える。
+# 作業: 結果表を Excel に保存する。文献番号をクリックでページが開くリンクにし(Google Patents。要約で代用した行は J-PlatPat)、見やすく整える。
 def save_evaluation_excel(df, path) -> None:
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.styles import Alignment, Font, PatternFill

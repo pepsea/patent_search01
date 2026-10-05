@@ -259,7 +259,7 @@ cells = [
             "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
+            "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
 ]
