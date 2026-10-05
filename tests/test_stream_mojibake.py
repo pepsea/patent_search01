@@ -195,21 +195,27 @@ def test_diagnose_ollama_reports_garble(monkeypatch, capsys):
     assert "補正後: 全RNAは（文字化け）です" in screen
 
 
-def test_evaluate_table_shows_prompt_with_backend_note(capsys, tmp_path, monkeypatch):
+def test_render_prompt_includes_system_user_and_backend_note():
+    from patent_search.evaluate import render_prompt
+
+    text = render_prompt(ollama_backend(mode="none"), TOPIC, "特開1", REC)
+    i, j = text.index("【システムプロンプト】"), text.index("【ユーザープロンプト】")
+    assert i < j and "あなたは特許調査の専門家" in text and "# 調査テーマ\nTOTAL-RNA-seq" in text
+    assert "# 出力形式" in text and text.rstrip().endswith('"evidence": ["本文からの引用"]}')  # 渡る文章の末尾まで
+    # 構造化出力(schema)では、出力形式の指示は足されない。バックエンドの指定が無ければ(guidance など)足さない
+    assert "# 出力形式" not in render_prompt(ollama_backend(mode="schema"), TOPIC, "特開1", REC)
+    assert "# 出力形式" not in render_prompt(lambda *a, **k: "", TOPIC, "特開1", REC)
+
+
+def test_evaluate_table_does_not_print_prompt(capsys, tmp_path, monkeypatch):
     import requests
 
     (tmp_path / "JP1A.json").write_text(json.dumps(REC), encoding="utf-8")
     nums = pd.DataFrame([{"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "発明の名称": "名称A"}])
     monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse([json.dumps(GOOD, ensure_ascii=False)]))
-    backend = ollama_backend(mode="none")
-    evaluate_table(backend, TOPIC, nums, tmp_path, stream=True, show_prompt=True)
+    evaluate_table(ollama_backend(mode="none"), TOPIC, nums, tmp_path, stream=True)
     screen = capsys.readouterr().out
-    # システム → ユーザー(調べたいこと・特許本文・出力形式の指示) → 生成の順に表示される
-    i, j, k = screen.index("【システムプロンプト】"), screen.index("【ユーザープロンプト】"), screen.index("【LLM の生成】")
-    assert i < j < k and "あなたは特許調査の専門家" in screen and "# 調査テーマ\nTOTAL-RNA-seq" in screen
-    assert "# 出力形式" in screen and '"score"' in screen[k:]
-    # 構造化出力(schema)では、出力形式の指示は足されない
-    assert ollama_backend(mode="schema").extra_prompt == ""
-    # show_prompt=False なら出さない
-    evaluate_table(backend, TOPIC, nums, tmp_path, stream=True)
-    assert "【ユーザープロンプト】" not in capsys.readouterr().out
+    assert "【ユーザープロンプト】" not in screen and "# 調査テーマ" not in screen  # プロンプトは出さない
+    assert "━━ 特開1  名称A" in screen and '"score": 2' in screen  # 生成の様子だけ出る
+
+

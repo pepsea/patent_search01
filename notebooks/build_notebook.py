@@ -81,8 +81,9 @@ HF_MODEL_ID = "Qwen/Qwen3-14B"
 MAX_CHARS = 6000
 # True なら、手順3で LLM が生成している様子を、画面にリアルタイムで表示する。
 STREAM = True
-# True なら、手順3で LLM に渡すプロンプト(システム・ユーザー)も、1 件ごとに画面に表示する。長いので、確認が済んだら False にする。
-SHOW_PROMPT = True
+# 手順3の直前に、LLM に渡るプロンプトを確認する特許の文献番号(例: "特開2011-204261")。
+# None なら、全文 JSON がある先頭の 1 件。
+PREVIEW_DOC = None
 # 手順3で評価する件数。まず 3 で試し、問題なければ None(全件)にする。
 EVAL_LIMIT = 3
 
@@ -146,14 +147,22 @@ else:
     raise ValueError(BACKEND)
 # 設定の「調べたいこと」を 1 つにまとめる。
 topic = Topic(TOPIC_NAME, TOPIC_DEFINITION, TOPIC_KEYWORDS, TOPIC_INCLUDE, TOPIC_EXCLUDE)
-# 手順2で保存した全文 JSON のうち、1 件目をプロンプトの見本に使う。
-samples = sorted(Path(TEXT_DIR).glob("*.json"))
-if samples:
-    prompt, _ = build_prompt(topic, "（例）" + samples[0].stem, json.loads(samples[0].read_text(encoding="utf-8")), MAX_CHARS)
-    # LLM に実際に渡る文章を表示する(内容を目で確認する)。
-    print(prompt)
+
+# プロンプトを確認する特許を選ぶ。PREVIEW_DOC が None なら、全文 JSON がある先頭の 1 件。
+candidates = numbers if PREVIEW_DOC is None else numbers[numbers["文献番号"] == PREVIEW_DOC]
+preview = None
+for _, row in candidates.iterrows():
+    path = Path(TEXT_DIR) / f"{row['Google Patents ID(推定)']}.json"
+    if path.exists():
+        preview = (row["文献番号"], json.loads(path.read_text(encoding="utf-8")))
+        break
+
+# LLM に実際に渡る文章(システム + ユーザー + 出力形式の指示)だけを表示する。生成はしない。
+if preview:
+    print(f"確認する特許: {preview[0]}\\n")
+    print(render_prompt(backend, topic, preview[0], preview[1], MAX_CHARS))
 else:
-    print("全文 JSON がまだありません(手順2で本文も CSV の要約も得られた特許がありません)。見本は表示しません。")'''
+    print("全文 JSON がまだありません(手順2で本文も CSV の要約も得られた特許がありません)。プロンプトは表示しません。")'''
 
 STEP2_RUN = """# LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets = numbers if LIMIT is None else numbers.head(LIMIT)
@@ -167,9 +176,8 @@ result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状
 
 STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
-# LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら生成の様子が、SHOW_PROMPT が True ならプロンプトも、1 件ごとに画面に表示される。
-evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES,
-                       stream=STREAM, show_prompt=SHOW_PROMPT)
+# LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら、生成の様子がリアルタイムで表示される。
+evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES, stream=STREAM)
 # 結果を Excel に保存する(文献番号をクリックで Google Patents が開く。列と順番は固定)。
 save_evaluation_excel(evaluation, RESULT_EVAL_XLSX)
 print('->', RESULT_EVAL_XLSX)
@@ -262,13 +270,13 @@ cells = [
             "なし(関数を定義するだけ)", "なし(次の 2 つのセルで使う関数ができる)"),
     code(evaluate_src),
     explain("LLM の準備とプロンプトの確認",
-            "設定の BACKEND・OLLAMA_FORMAT に応じて LLM に問い合わせる準備をし、調べたいことをまとめ、実際に LLM に渡る文章(プロンプト)の見本を表示する。"
+            "設定の BACKEND・OLLAMA_FORMAT に応じて LLM に問い合わせる準備をし、調べたいことをまとめ、実際に LLM に渡る文章（システムプロンプトとユーザープロンプト。出力形式の指示を含む）だけを 1 件分表示する。生成はしないので、次のセルで評価を始める前に、渡る内容を確認できる。確認する特許は PREVIEW_DOC で選ぶ。"
             "ollama は Ollama の起動と `ollama pull qwen3:14b` 済みであること。"
             "guidance は `pip install guidance transformers torch accelerate` が必要で、モデルは初回に Hugging Face から取得される",
             "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の SHOW_PROMPT が True なら、LLM に渡すプロンプト（システム・ユーザー）を 1 件ごとに表示し、STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
+            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する（プロンプトは表示しない。確認は直前のセル）。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
     explain("文字化けの診断（必要なときだけ実行）",

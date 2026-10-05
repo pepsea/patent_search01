@@ -3,6 +3,7 @@
 作業の流れ:
  1. keyword_snippets: 本文から、調べたいことの関連語の周辺を抜粋する(本文が長いため)
  2. build_prompt    : 調べたいこと + 判定基準 + 特許の本文(抜粋)から、LLM に渡す文章を作る
+    render_prompt   : 実際に渡る文章(システム + ユーザー + 出力形式の指示)を、生成せずに表示用の文章にする
  3. バックエンド    : ollama_backend(この PC) / guidance_backend(サーバー)で LLM に判定させる。生成の様子は 1 語ずつ画面に出せる
     返答は、文字化け(UTF-8 が Latin-1 として読まれた「ï»¿」「ã」型)を検出して補正し、JSON の形も検査する
  4. check_evidence  : LLM が出した「根拠の引用」が原文に実在するかを確認する
@@ -151,6 +152,13 @@ def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) ->
 
 
 # ---- バックエンド: (system, user, schema) -> JSON 文字列 -------------------------------
+
+# 作業: LLM に渡すプロンプト(システム + ユーザー + バックエンドが足す出力形式の指示)を、文章にして返す。
+# 生成はしない。実際に評価を始める前に、渡る内容を目で確認するために使う。
+def render_prompt(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) -> str:
+    prompt, _ = build_prompt(topic, doc_no, rec, max_chars)
+    return f"【システムプロンプト】\n{SYSTEM}\n\n【ユーザープロンプト】\n{prompt}{getattr(backend, 'extra_prompt', '')}"
+
 
 # ---- 返答の検査と補正 -------------------------------------------------------------------------
 
@@ -432,9 +440,9 @@ def company_name(applicant, aliases: dict | None = None) -> str:
 
 
 # 作業: 文献番号表の各行を、全文 JSON(text_dir/{ID}.json)で評価し、FINAL_COLUMNS の順の結果表を返す。
-# stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。show_prompt=True なら、LLM に渡すプロンプトも、1 件ごとに画面に出す。
+# stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。
 def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None,
-                   stream: bool = False, show_prompt: bool = False):
+                   stream: bool = False):
     from pathlib import Path
 
     import pandas as pd
@@ -456,12 +464,8 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         jp_url = r.get("J-PlatPat URL")
         if rec.get("source") == "csv_abstract" and isinstance(jp_url, str) and jp_url:
             base["リンク"] = jp_url
-        if stream or show_prompt:
+        if stream:  # 生成の様子を、1 語ずつ画面に出す
             print(f"\n━━ {r['文献番号']}  {r.get('発明の名称') or ''}", flush=True)
-        if show_prompt:  # LLM に実際に渡す文章(バックエンドが足す出力形式の指示も含む)
-            shown_prompt, _ = build_prompt(topic, r["文献番号"], rec, max_chars)
-            print(f"\n【システムプロンプト】\n{SYSTEM}\n\n【ユーザープロンプト】\n{shown_prompt}{getattr(backend, 'extra_prompt', '')}"
-                  f"\n\n【LLM の生成】", flush=True)
         try:
             o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars,
                              on_token=(lambda t: print(t, end="", flush=True)) if stream else None)
@@ -474,7 +478,7 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         rows.append({**base, "関連度": o["score"], "判定": o["judgement"], "理由": o["reason"],
                      "根拠の引用": " / ".join(o["evidence"]), "引用の検証": o["evidence_check"],
                      "関連語ヒット数": o["keyword_hits"], "発明内容概要": summary})
-        print(("\n→ " if (stream or show_prompt) else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
+        print(("\n→ " if stream else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
     df = pd.DataFrame(rows)
     for c in FINAL_COLUMNS + ["リンク"]:
         if c not in df:
