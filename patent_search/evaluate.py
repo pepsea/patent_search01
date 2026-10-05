@@ -122,10 +122,17 @@ def keyword_snippets(text: str, keywords: list[str], width: int = 150, max_snipp
     return [text[a:b].replace("\n", " ") for a, b in spans[:max_snippets]], len(hits)
 
 
+# 作業: 請求項も明細書も無く、要約だけの特許か(Web から取れず、CSV の要約で代用した場合など)を判定する。
+def is_abstract_only(rec: dict) -> bool:
+    return not rec.get("claims_nfkc") and not rec.get("description_nfkc")
+
+
 # 作業: 調べたいこと・判定基準・特許本文を、1 つのプロンプトに組み立てる。
 def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) -> tuple[str, int]:
     """rec は全文JSON(*_nfkc キーを使う)。max_chars で本文の長さを抑える。(プロンプト, 関連語ヒット数)"""
-    desc = rec["description_nfkc"]
+    # 要約しか無い場合(Web から本文が取れなかった場合)は、要約から関連語を探す
+    abstract_only = is_abstract_only(rec)
+    desc = rec["description_nfkc"] or rec["abstract_nfkc"]
     snippets, hits = keyword_snippets(desc, topic.keywords)
     body = "\n---\n".join(snippets) if snippets else desc[:1500]
     claims = rec["claims_nfkc"]
@@ -133,8 +140,12 @@ def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) ->
         name=topic.name, definition=topic.definition.strip(),
         keywords="、".join(topic.keywords) or "(なし)", include=topic.include.strip() or "(指定なし)",
         exclude=topic.exclude.strip() or "(指定なし)", doc_no=doc_no, title=rec["title_nfkc"],
-        abstract=rec["abstract_nfkc"][:1500], claims=claims[: max_chars // 2], description=body[: max_chars // 2],
+        abstract=rec["abstract_nfkc"][:1500],
+        claims=claims[: max_chars // 2] if claims else "(取得できなかったため、なし)",
+        description=("(取得できなかったため、なし。要約だけで判定する)" if abstract_only else body[: max_chars // 2]),
     )
+    if abstract_only:
+        prompt += "\n\n注意: この特許は要約しか入手できていない。要約に書かれていないことは判断できないので、根拠が弱い場合は score を 0 か 1 にする。"
     return prompt, hits
 
 
@@ -199,6 +210,8 @@ def evaluate_one(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_ch
     source = rec["abstract_nfkc"] + rec["claims_nfkc"] + rec["description_nfkc"]
     out["evidence_check"] = check_evidence(out.get("evidence", []), source)
     out["keyword_hits"] = hits
+    if is_abstract_only(rec):  # 結果の表で、要約だけで判定したと分かるようにする
+        out["reason"] = "【要約のみで判定】" + out.get("reason", "")
     return out
 
 
@@ -282,10 +295,14 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
 
 # 作業: 結果表を Excel に保存する。文献番号をクリックで Google Patents が開くリンクにし、見やすく整える。
 def save_evaluation_excel(df, path) -> None:
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    out = df[FINAL_COLUMNS]
+    # LLM の出力に制御文字が混ざると Excel に書けず、ファイルが壊れるので、先に取り除く
+    out = df[FINAL_COLUMNS].copy()
+    for c in out.columns:
+        out[c] = out[c].map(lambda v: ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v)
     with __import__("pandas").ExcelWriter(path, engine="openpyxl") as w:
         out.to_excel(w, index=False, sheet_name="評価結果")
         ws = w.sheets["評価結果"]

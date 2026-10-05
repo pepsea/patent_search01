@@ -1,16 +1,20 @@
 """プログラム1: J-PlatPat「検索結果一覧(国内文献)」のコピーテキストを、重複のない表にする。
 
 J-PlatPat の画面は JavaScript で描画されるため、保存した HTML には表が入らない。
-そのため、結果一覧をコピーして貼り付けたテキスト(*.txt)を読む。
+そのため、結果一覧をコピーして貼り付けたテキスト(*.txt)、または J-PlatPat からダウンロードした CSV(*.csv)を読む。
+CSV には「要約」が入っているので、Google Patents から本文が取れなかった場合の代わりに使える。
 
 作業の流れ:
  1. parse_text      : テキストを 1 件ずつ(No. の連番を目印に)区切り、各項目に振り分ける
+    parse_csv_text  : CSV を 1 行ずつ読み、同じ項目に振り分ける(要約・J-PlatPat の URL も取る)
  2. google_patent_id: 文献番号から Google Patents の ID 候補(例: JP2017080742A)を作る
- 3. build_list      : フォルダ内の全 txt を読み、文献番号で重複を除いた一覧(DataFrame)にまとめる
+ 3. build_list      : フォルダ内の全 txt / csv を読み、文献番号で重複を除いた一覧(DataFrame)にまとめる
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -43,6 +47,9 @@ class PatentRow:
     fi: list[str] = field(default_factory=list)
     fi_has_more: bool = False
     warnings: list[str] = field(default_factory=list)
+    # CSV にだけある項目。Google Patents から本文が取れなかった場合の代わりに使う。
+    abstract: str = ""
+    jplatpat_url: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -145,6 +152,60 @@ def load_file(path: str | Path) -> list[PatentRow]:
     return parse_text(Path(path).read_text(encoding="utf-8"))
 
 
+# ---- CSV の読み取り -------------------------------------------------------------------------------
+
+# 作業: CSV の FI 欄(カンマ区切り)を分ける。「G01N37/00,102」のように FI の中にもカンマがあるため、
+# FI の形(英字で始まる)でない部分は、直前の FI にくっつける。
+def _split_fi(text: str) -> list[str]:
+    out: list[str] = []
+    for t in (t.strip() for t in text.split(",")):
+        if not t:
+            continue
+        if FI_RE.match(t) or not out:
+            out.append(t)
+        else:
+            out[-1] += "," + t
+    return out
+
+
+# 作業: CSV の要約から、「(57)【要約】」「（修正有）」「【選択図】…」などの付随文字を除き、読める形にする。
+def _clean_abstract(text: str) -> str:
+    text = re.sub(r"^\s*\(57\)\s*【要約】", "", (text or "").strip()).replace("（修正有）", "")
+    lines = (re.sub(r"[ \t\u3000]+", " ", l).strip() for l in text.splitlines())
+    return "\n".join(l for l in lines if l and not l.startswith("【選択図】"))
+
+
+CSV_REQUIRED = ("文献番号", "出願番号", "発明の名称")
+
+
+# 作業: J-PlatPat の CSV を 1 行ずつ PatentRow にする(ステージ・イベント詳細はステータスに、要約は abstract に入れる)。
+def parse_csv_text(text: str) -> list[PatentRow]:
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    missing = [c for c in CSV_REQUIRED if c not in (reader.fieldnames or [])]
+    if missing:
+        raise ValueError(f"CSV の列が足りません: {missing}(見つかった列: {reader.fieldnames})")
+    rows = []
+    for i, d in enumerate(reader, start=1):
+        doc_no = (d.get("文献番号") or "").strip()
+        if not doc_no:
+            continue
+        r = PatentRow(
+            no=i, doc_no=doc_no, app_no=(d.get("出願番号") or "").strip(),
+            filing_date=(d.get("出願日") or "").strip(), publication_date=(d.get("公知日") or "").strip(),
+            title=(d.get("発明の名称") or "").strip(), applicant=(d.get("出願人/権利者") or "").strip(),
+            status=[x.strip() for x in (d.get("ステージ"), d.get("イベント詳細")) if x and x.strip()],
+            fi=_split_fi(d.get("FI") or ""), abstract=_clean_abstract(d.get("要約") or ""),
+            jplatpat_url=(d.get("文献URL") or "").strip(),
+        )
+        if not DOC_RE.match(doc_no):
+            r.warnings.append("文献番号の書式が未知")
+        for label, v in (("出願日", r.filing_date), ("公知日", r.publication_date)):
+            if not DATE_RE.match(v):
+                r.warnings.append(f"{label}の書式が未知")
+        rows.append(r)
+    return rows
+
+
 # ---- フォルダ内の複数ファイルを統合し、重複を除いた一覧を作る ------------------------------------
 
 LIST_COLUMNS = {
@@ -153,6 +214,7 @@ LIST_COLUMNS = {
     "applicant_has_more": "出願人(他あり)", "status": "ステータス", "fi": "FI",
     "fi_has_more": "FI(他あり)", "google_patent_id": "Google Patents ID(推定)",
     "google_patent_url": "Google Patents URL(推定)", "warnings": "警告",
+    "abstract": "要約(CSV)", "jplatpat_url": "J-PlatPat URL",
 }
 
 
@@ -167,29 +229,41 @@ def read_text_file(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def build_list(folder: str | Path, pattern: str = "*.txt"):
-    """folder 内の pattern に合う全ファイルを読み、文献番号で重複を除いた一覧を作る。
+def build_list(folder: str | Path, pattern: str | list[str] | tuple[str, ...] = "*.txt"):
+    """folder 内の pattern(複数可。例: ["*.txt", "*.csv"])に合う全ファイルを読み、文献番号で重複を除いた一覧を作る。
 
     戻り値: (一覧 DataFrame, 報告 dict)
+    - 拡張子が .csv のファイルは CSV として、それ以外はコピーしたテキストとして読む。
     - 同じ文献番号が複数のファイルにある場合は、更新日時が新しいファイルの行を採用する
-      （ステータスは時間とともに変わるため）。出典は「出典ファイル」列に全て残す。
+      （ステータスは時間とともに変わるため）。ただし要約は、新しい行にない場合は古い行のものを残す。
+      出典は「出典ファイル」列に全て残す。
     - 同じ出願番号で文献番号が異なる行(公開公報と登録公報など)は除かず、「同一出願番号の別文献」列で示す。
     """
     import pandas as pd
 
-    files = sorted(Path(folder).glob(pattern), key=lambda p: (p.stat().st_mtime, p.name))
+    patterns = [pattern] if isinstance(pattern, str) else list(pattern)
+    files = sorted({f for p in patterns for f in Path(folder).glob(p)}, key=lambda p: (p.stat().st_mtime, p.name))
     if not files:
-        raise FileNotFoundError(f"{folder} に {pattern} が見つかりません")
+        raise FileNotFoundError(f"{folder} に {patterns} が見つかりません")
     per_file, kept, sources, conflicts = [], {}, {}, []
     # 古いファイルから順に処理し、同じ文献番号は後(=新しいファイル)の内容で上書きする
     for f in files:
-        rows = parse_text(read_text_file(f))
-        per_file.append({"ファイル": f.name, "読み取り件数": len(rows),
-                         "警告あり": sum(bool(r.warnings) for r in rows)})
+        is_csv = f.suffix.lower() == ".csv"
+        try:
+            rows = (parse_csv_text if is_csv else parse_text)(read_text_file(f))
+        except ValueError as e:  # CSV の列が違う場合など。どのファイルかを分かるようにする
+            raise ValueError(f"{f.name}: {e}") from e
+        per_file.append({"ファイル": f.name, "形式": "csv" if is_csv else "txt", "読み取り件数": len(rows),
+                         "警告あり": sum(bool(r.warnings) for r in rows),
+                         "要約あり": sum(bool(r.abstract) for r in rows)})
         for r in rows:
-            if r.doc_no in kept and (kept[r.doc_no].status != r.status or kept[r.doc_no].title != r.title):
+            old = kept.get(r.doc_no)
+            if old and (old.status != r.status or old.title != r.title):
                 conflicts.append({"文献番号": r.doc_no, "採用ファイル": f.name,
-                                  "旧ステータス": " / ".join(kept[r.doc_no].status), "新ステータス": " / ".join(r.status)})
+                                  "旧ステータス": " / ".join(old.status), "新ステータス": " / ".join(r.status)})
+            if old:  # 新しい行に無い項目(CSV にだけある要約・URL)は、古い行のものを引き継ぐ
+                r.abstract = r.abstract or old.abstract
+                r.jplatpat_url = r.jplatpat_url or old.jplatpat_url
             kept[r.doc_no] = r
             sources.setdefault(r.doc_no, [])
             if f.name not in sources[r.doc_no]:

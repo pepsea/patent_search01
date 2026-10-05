@@ -48,10 +48,11 @@ def make_run_dir(root: str | Path, topic_name: str, run_dir: str | Path | None =
     return path
 
 
-# 作業: 入力の txt を調査フォルダの input/ にコピーする。どの入力でその結果になったかを残すため。
-def register_inputs(run_dir: Path, input_dir: str | Path, pattern: str = "*.txt") -> list[str]:
+# 作業: 入力のファイル(txt / csv)を調査フォルダの input/ にコピーする。どの入力でその結果になったかを残すため。
+def register_inputs(run_dir: Path, input_dir: str | Path, pattern: str | list[str] | tuple[str, ...] = "*.txt") -> list[str]:
+    patterns = [pattern] if isinstance(pattern, str) else list(pattern)
     copied = []
-    for f in sorted(Path(input_dir).glob(pattern)):
+    for f in sorted({f for p in patterns for f in Path(input_dir).glob(p)}):
         shutil.copy2(f, Path(run_dir) / "input" / f.name)
         copied.append(f.name)
     return copied

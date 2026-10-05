@@ -105,3 +105,17 @@ def test_final_excel_columns_hyperlink_and_summary(tmp_path):
     assert [c.value for c in ws[1]] == FINAL_COLUMNS  # 指定どおりの列と順序
     assert ws["A2"].value == "特開1" and ws["A2"].hyperlink.target == "https://patents.google.com/patent/JP1A/ja"
     assert ws["B3"].value == "本文なし(未取得)"
+
+
+def test_excel_survives_control_characters_from_llm(tmp_path):
+    import pandas as pd
+    from openpyxl import load_workbook
+
+    from patent_search.evaluate import FINAL_COLUMNS, save_evaluation_excel
+
+    row = {c: "x" for c in FINAL_COLUMNS}
+    row.update({"理由": "あ\x00い\x07う\x1fえ", "リンク": "https://example.com/p"})
+    path = tmp_path / "o.xlsx"
+    save_evaluation_excel(pd.DataFrame([row]), path)
+    ws = load_workbook(path)["評価結果"]
+    assert ws.cell(row=2, column=FINAL_COLUMNS.index("理由") + 1).value == "あいうえ"

@@ -4,6 +4,7 @@
  1. fetch         : 1 件分の URL にアクセスして HTML を取得し、results/html/ に保存する(取得済みは再利用)
  2. extract       : HTML から、名称・要約・請求項・明細書(段落番号つき)を取り出す
  3. save_fulltext : 全文を切り詰めずに JSON で保存する(原文と、全角を半角に揃えた NFKC 版)
+    Web から取れず、入力が CSV で要約がある場合は、その要約だけを本文として保存する(出所を記録)
  4. run           : 上の 1〜3 を表の全行に対して繰り返し、結果の表(Excel 出力用)を返す
 
 python -m patent_search.fetch_google IN.xlsx OUT.xlsx [--html-dir results/html] [--limit N] [--delay 3]
@@ -73,9 +74,14 @@ def extract(html: str) -> dict:
         "description": "\n".join(paras) or _text(_content(desc)),
         "claim_count": len(claims),
     }
-    missing = [k for k in ("title", "abstract", "claims", "description") if not out[k]]
-    out["extract_status"] = "OK" if not missing else "欠落: " + ",".join(missing)
+    out["extract_status"] = extract_status(out)
     return out
+
+
+# 作業: 名称・要約・請求項・明細書のうち、取れなかった項目を判定する(全部あれば OK)。
+def extract_status(x: dict) -> str:
+    missing = [k for k in ("title", "abstract", "claims", "description") if not x[k]]
+    return "OK" if not missing else "欠落: " + ",".join(missing)
 
 
 # 作業: 1 件の HTML を取得する。調査フォルダにあればそれを使い、
@@ -108,10 +114,14 @@ def nfkc(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
-def save_fulltext(text_dir: Path, pid: str, x: dict) -> Path:
-    """切り詰めなしの全文(原文と NFKC 正規化)を JSON で保存する。"""
+def save_fulltext(text_dir: Path, pid: str, x: dict, source: str = "web") -> Path:
+    """切り詰めなしの全文(原文と NFKC 正規化)を JSON で保存する。
+
+    source: "web"(Google Patents の本文) / "csv_abstract"(Web から取れず、CSV の要約だけ)。評価の段階で使う。
+    """
     path = text_dir / f"{pid}.json"
-    data = {k: x[k] for k in ("title", "abstract", "claims", "description")}
+    data = {"source": source}
+    data.update({k: x[k] for k in ("title", "abstract", "claims", "description")})
     data.update({k + "_nfkc": nfkc(x[k]) for k in ("title", "abstract", "claims", "description")})
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return path
@@ -142,12 +152,28 @@ def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | N
             except requests.RequestException as e:
                 html, used, status = "", pid, f"error: {type(e).__name__}"
             rec.update({"使用ID": used, "取得状況": status})
+            # CSV を入力にした場合だけ、要約(CSV)の列がある。Web から本文が取れなかったときの代わりに使う。
+            csv_abs = r.get("要約(CSV)")
+            csv_abs = csv_abs if isinstance(csv_abs, str) else ""
+            x, source = None, "web"
             if html:
                 x = extract(html)
-                rec.update({"名称(Google)": x["title"], "要約": x["abstract"],
+                # Web に要約がなければ、CSV の要約で補う
+                if not x["abstract"] and csv_abs:
+                    x["abstract"] = csv_abs
+                    x["extract_status"] = extract_status(x) + " / 要約はCSVで補完"
+            elif csv_abs:
+                # 404 などで Web から取れない場合は、CSV の要約だけを本文として使う(請求項・明細書は空)
+                x = {"title": r.get("発明の名称") or "", "abstract": csv_abs, "claims": "", "description": "",
+                     "claim_count": 0, "extract_status": f"Web取得失敗({status}): CSVの要約のみ使用"}
+                source = "csv_abstract"
+            if x:
+                rec.update({"本文の出所": "Google Patents" if source == "web" else "CSVの要約のみ",
+                            "名称(Google)": x["title"], "要約": x["abstract"],
                             "請求項数": x["claim_count"], "請求項": x["claims"],
                             "明細書": x["description"], "明細書文字数": len(x["description"]),
-                            "名称(正規化)": nfkc(x["title"]), "全文ファイル": str(save_fulltext(text_dir, used, x)),
+                            "名称(正規化)": nfkc(x["title"]),
+                            "全文ファイル": str(save_fulltext(text_dir, used, x, source)),
                             "抽出状況": x["extract_status"]})
                 # Excel のセルは約 3 万 2 千文字までなので、超える分は切り詰める(全文は JSON と HTML に残る)
                 if len(x["description"]) > EXCEL_CELL_MAX:

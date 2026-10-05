@@ -15,10 +15,11 @@ import json
 
 # ================= 手順1・2 の設定 =================
 
-# J-PlatPat の結果一覧をコピーした txt を入れたフォルダ。複数ファイルを置くと、まとめて読み込んで重複を除く。
+# J-PlatPat の結果(txt または csv)を入れたフォルダ。複数ファイルを置くと、まとめて読み込んで重複を除く。
 INPUT_DIR = "../data"
-# フォルダ内で読み込むファイルの名前の形。
-INPUT_PATTERN = "*.txt"
+# 入力の形式。"txt"(結果一覧をコピーしたテキスト)、"csv"(J-PlatPat からダウンロードした CSV)、"both"(両方)から選ぶ。
+# csv には「要約」が入っている。Google Patents から本文が取れなかった(404 など)場合に、この要約を代わりに使う。
+INPUT_FORMAT = "txt"
 # 結果を入れる大元のフォルダ。この中に「トピック名_日時」の調査フォルダが作られる。
 RESULTS_ROOT = "results"
 # None なら、実行のたびに新しい調査フォルダを作る。途中から続ける場合は、既存のフォルダ名を指定する。
@@ -90,13 +91,16 @@ COMPANY_ALIASES = {
     "シェイプコープ": "Shape Corp.",
 }
 
+# 入力の形式から、読み込むファイルの名前の形を決める。
+INPUT_PATTERNS = {"txt": ["*.txt"], "csv": ["*.csv"], "both": ["*.txt", "*.csv"]}[INPUT_FORMAT]
+
 # 大元のフォルダを作る(すでにあれば何もしない)。
 Path(RESULTS_ROOT).mkdir(exist_ok=True)'''
 
 RUN_CELL = '''# 調査フォルダ「トピック名_日時」を作る(RUN_DIR を指定した場合は、その既存フォルダを使う)。
 run_dir = make_run_dir(RESULTS_ROOT, TOPIC_NAME, RUN_DIR)
-# 入力の txt を、調査フォルダの input/ にコピーして残す。
-copied = register_inputs(run_dir, INPUT_DIR, INPUT_PATTERN)
+# 入力のファイル(txt / csv)を、調査フォルダの input/ にコピーして残す。
+copied = register_inputs(run_dir, INPUT_DIR, INPUT_PATTERNS)
 # 以降のセルが使う出力先を、すべて調査フォルダの中に決める(ファイル名にトピック名は使わない)。
 NUMBERS_XLSX = run_file(run_dir, "patent_numbers")
 RESULT_XLSX = run_file(run_dir, "patents_text")
@@ -109,14 +113,14 @@ save_run_settings(run_dir, {
     "含める条件": TOPIC_INCLUDE, "除外する条件": TOPIC_EXCLUDE,
     "LLM方式": BACKEND, "モデル": OLLAMA_MODEL if BACKEND == "ollama" else HF_MODEL_ID,
     "num_ctx": OLLAMA_NUM_CTX, "本文の最大文字数": MAX_CHARS, "取得件数(LIMIT)": LIMIT, "評価件数(EVAL_LIMIT)": EVAL_LIMIT,
-    "取得間隔(秒)": DELAY, "入力フォルダ": INPUT_DIR, "入力ファイル": copied, "出願企業の別名": COMPANY_ALIASES,
+    "取得間隔(秒)": DELAY, "入力フォルダ": INPUT_DIR, "入力形式": INPUT_FORMAT, "入力ファイル": copied, "出願企業の別名": COMPANY_ALIASES,
 })
 print("調査フォルダ:", run_dir)'''
 
 STEP1_RUN = '''import pandas as pd
 
-# フォルダ内の全 txt を読み、文献番号で重複を除いた一覧(numbers)と、読み込みの報告(report)を作る。
-numbers, report = build_list(INPUT_DIR, INPUT_PATTERN)
+# フォルダ内の全ファイル(txt / csv)を読み、文献番号で重複を除いた一覧(numbers)と、読み込みの報告(report)を作る。
+numbers, report = build_list(INPUT_DIR, INPUT_PATTERNS)
 # 一覧を Excel に保存する。
 numbers.to_excel(NUMBERS_XLSX, index=False)
 # 件数の内訳を表示する。
@@ -135,10 +139,13 @@ else:
 # 設定の「調べたいこと」を 1 つにまとめる。
 topic = Topic(TOPIC_NAME, TOPIC_DEFINITION, TOPIC_KEYWORDS, TOPIC_INCLUDE, TOPIC_EXCLUDE)
 # 手順2で保存した全文 JSON のうち、1 件目をプロンプトの見本に使う。
-sample = next(Path(TEXT_DIR).glob("*.json"))
-prompt, _ = build_prompt(topic, "（例）" + sample.stem, json.loads(sample.read_text(encoding="utf-8")), MAX_CHARS)
-# LLM に実際に渡る文章を表示する(内容を目で確認する)。
-print(prompt)'''
+samples = sorted(Path(TEXT_DIR).glob("*.json"))
+if samples:
+    prompt, _ = build_prompt(topic, "（例）" + samples[0].stem, json.loads(samples[0].read_text(encoding="utf-8")), MAX_CHARS)
+    # LLM に実際に渡る文章を表示する(内容を目で確認する)。
+    print(prompt)
+else:
+    print("全文 JSON がまだありません(手順2で本文も CSV の要約も得られた特許がありません)。見本は表示しません。")'''
 
 STEP2_RUN = """# LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets = numbers if LIMIT is None else numbers.head(LIMIT)
@@ -174,8 +181,8 @@ def explain(title, work, inp, out):
 
 cells = [
     md("# 特許調査パイプライン（ステップ1〜3）\n"
-       "1. 指定フォルダ内の J-PlatPat 検索結果一覧（コピーしたテキスト、複数可）を統合し、重複を除いた文献番号表を作る\n"
-       "2. 文献番号から Google Patents（日本語ページ）の HTML を取得し、名称・要約・請求項・明細書を Excel に出力する\n"
+       "1. 指定フォルダ内の J-PlatPat 検索結果（コピーしたテキスト txt、またはダウンロードした csv。どちらも複数可）を統合し、重複を除いた文献番号表を作る\n"
+       "2. 文献番号から Google Patents（日本語ページ）の HTML を取得し、名称・要約・請求項・明細書を Excel に出力する（取得できない場合は、csv の要約で代用）\n"
        "3. ローカル LLM で、各特許が「調べたいこと」に関連するかを評価して表にする\n\n"
        "**使い方**: 上から順に実行。まず設定セルの値を変更し、手順2・3は `LIMIT` / `EVAL_LIMIT = 3` などで少数件を試してから全件にしてください。\n\n"
        "**各セルの説明は、そのセルの上にあります。** プログラム本体のセル（タイトルが「プログラム○」のもの）は、先頭にそのプログラムの作業の流れが書いてあります。\n\n"
@@ -199,17 +206,17 @@ cells = [
     explain("調査フォルダの作成",
             "設定のトピック名と現在の日時で調査フォルダを作り、入力の txt を input/ にコピーし、設定を run_settings.json に保存する。"
             "以降の出力は、すべてこのフォルダの中に入る(html/ text/ patent_numbers.xlsx patents_text.xlsx evaluation.xlsx)",
-            "設定のトピック名・RUN_DIR・各設定、INPUT_DIR の txt", "調査フォルダ、run_dir、各出力ファイルの場所(NUMBERS_XLSX など)"),
+            "設定のトピック名・RUN_DIR・各設定、INPUT_DIR の txt / csv", "調査フォルダ、run_dir、各出力ファイルの場所(NUMBERS_XLSX など)"),
     code(RUN_CELL),
     md("## 手順1: 文献番号の一覧を作る"),
     explain("プログラム1: テキストの読み取り",
-            "J-PlatPat の結果一覧テキストを 1 件ずつに区切り、文献番号・出願番号・日付・名称・出願人・ステータス・FI に振り分ける。"
+            "J-PlatPat の結果一覧（txt は 1 件ずつに区切り、csv は 1 行ずつ読み）、文献番号・出願番号・日付・名称・出願人・ステータス・FI（csv は要約も）に振り分ける。"
             "フォルダ内の複数ファイルをまとめ、文献番号で重複を除く。Google Patents の ID 候補も作る",
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 parse_text・build_list などができる)"),
     code(platpat),
     explain("手順1の実行: 一覧の作成",
-            "設定したフォルダの全 txt を読み、重複を除いた文献番号の一覧を作って Excel に保存する",
-            "設定の INPUT_DIR 内の txt", "numbers(一覧)、report(報告)、調査フォルダ内の patent_numbers.xlsx"),
+            "設定したフォルダの全ファイル（INPUT_FORMAT で選んだ txt / csv）を読み、重複を除いた文献番号の一覧を作って Excel に保存する。csv の場合は、要約も一覧に入る",
+            "設定の INPUT_DIR 内の txt / csv", "numbers(一覧)、report(報告)、調査フォルダ内の patent_numbers.xlsx"),
     code(STEP1_RUN),
     explain("確認: ファイル間で内容が違った行",
             "同じ文献番号でファイル間にステータス等の違いがあった行を表示する。新しいファイルの内容を採用済み",
@@ -231,11 +238,11 @@ cells = [
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 run などができる)"),
     code(fetch_src),
     explain("手順2の実行: 取得と抽出",
-            "一覧の先頭から LIMIT 件について、HTML を取得し本文を抽出して Excel に保存する。取得済みの HTML は再利用する",
+            "一覧の先頭から LIMIT 件について、HTML を取得し本文を抽出して Excel に保存する。取得済みの HTML は再利用する。404 などで取得できなかった場合、csv の要約があれば、それだけを本文として使う（「本文の出所」列に「CSVの要約のみ」と出る。評価の理由にも「【要約のみで判定】」と付く）",
             "numbers、設定の LIMIT・DELAY", "result(表)、調査フォルダ内の patents_text.xlsx、html/、text/(共有キャッシュにも HTML を保存)"),
     code(STEP2_RUN),
     explain("確認: 取得・抽出に失敗した行",
-            "取得状況が 200 / cache 以外、または抽出状況が OK 以外の行を表示する",
+            "取得状況が 200 / cache 以外、または抽出状況が OK 以外の行を表示する。要約で代用した行もここに出る",
             "result", "表(空なら全件成功)"),
     code("result[(result['取得状況'].isin(['200', 'cache']) == False) | (result.get('抽出状況', 'OK') != 'OK')]"),
 
