@@ -69,12 +69,18 @@ RNAを単に治療薬の成分として扱うもの（核酸医薬、mRNAワク�
 BACKEND = "ollama"
 # Ollama のモデル名。ollama list で表示される名前。
 OLLAMA_MODEL = "qwen3:14b"
+# Ollama の返答の受け取り方。"none"(構造化出力を使わず、プロンプトで JSON を指示し、読めなければやり直す)、
+# "json"(Ollama の JSON モード)、"schema"(Ollama の構造化出力)から選ぶ。
+# 返答が文字化けする場合は "none" を使う。原因の切り分けは、最後の「文字化けの診断」セルで行う。
+OLLAMA_FORMAT = "none"
 # Ollama が一度に読める長さ。大きいと遅くメモリも使う。MAX_CHARS に合わせる。
 OLLAMA_NUM_CTX = 8192
 # guidance 用の Hugging Face のモデル ID。サーバーでは使うモデルに変更する。
 HF_MODEL_ID = "Qwen/Qwen3-14B"
 # 1件あたり LLM に渡す本文の最大文字数（請求項と明細書で半分ずつ）。
 MAX_CHARS = 6000
+# True なら、手順3で LLM が生成している様子を、画面にリアルタイムで表示する。
+STREAM = True
 # 手順3で評価する件数。まず 3 で試し、問題なければ None(全件)にする。
 EVAL_LIMIT = 3
 
@@ -112,7 +118,7 @@ save_run_settings(run_dir, {
     "トピック名": TOPIC_NAME, "定義": TOPIC_DEFINITION, "関連語": TOPIC_KEYWORDS,
     "含める条件": TOPIC_INCLUDE, "除外する条件": TOPIC_EXCLUDE,
     "LLM方式": BACKEND, "モデル": OLLAMA_MODEL if BACKEND == "ollama" else HF_MODEL_ID,
-    "num_ctx": OLLAMA_NUM_CTX, "本文の最大文字数": MAX_CHARS, "取得件数(LIMIT)": LIMIT, "評価件数(EVAL_LIMIT)": EVAL_LIMIT,
+    "num_ctx": OLLAMA_NUM_CTX, "Ollamaの返答方式": OLLAMA_FORMAT, "本文の最大文字数": MAX_CHARS, "取得件数(LIMIT)": LIMIT, "評価件数(EVAL_LIMIT)": EVAL_LIMIT,
     "取得間隔(秒)": DELAY, "入力フォルダ": INPUT_DIR, "入力形式": INPUT_FORMAT, "入力ファイル": copied, "出願企業の別名": COMPANY_ALIASES,
 })
 print("調査フォルダ:", run_dir)'''
@@ -130,7 +136,7 @@ report["files"]'''
 
 BACKEND_CELL = '''# 設定の BACKEND に応じて、LLM に問い合わせる関数(backend)を用意する。
 if BACKEND == "ollama":
-    backend = ollama_backend(OLLAMA_MODEL, num_ctx=OLLAMA_NUM_CTX)
+    backend = ollama_backend(OLLAMA_MODEL, num_ctx=OLLAMA_NUM_CTX, mode=OLLAMA_FORMAT)
 elif BACKEND == "guidance":
     from guidance import models
     backend = guidance_backend(models.Transformers(HF_MODEL_ID, device_map="auto"))
@@ -159,8 +165,8 @@ result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状
 
 STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
-# LLM で 1 件ずつ評価し、結果の表を受け取る。
-evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES)
+# LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら、生成の様子がリアルタイムで表示される。
+evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES, stream=STREAM)
 # 結果を Excel に保存する(文献番号をクリックで Google Patents が開く。列と順番は固定)。
 save_evaluation_excel(evaluation, RESULT_EVAL_XLSX)
 print('->', RESULT_EVAL_XLSX)
@@ -253,15 +259,21 @@ cells = [
             "なし(関数を定義するだけ)", "なし(次の 2 つのセルで使う関数ができる)"),
     code(evaluate_src),
     explain("LLM の準備とプロンプトの確認",
-            "設定の BACKEND に応じて LLM に問い合わせる準備をし、調べたいことをまとめ、実際に LLM に渡る文章(プロンプト)の見本を表示する。"
+            "設定の BACKEND・OLLAMA_FORMAT に応じて LLM に問い合わせる準備をし、調べたいことをまとめ、実際に LLM に渡る文章(プロンプト)の見本を表示する。"
             "ollama は Ollama の起動と `ollama pull qwen3:14b` 済みであること。"
             "guidance は `pip install guidance transformers torch accelerate` が必要で、モデルは初回に Hugging Face から取得される",
             "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価し、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
+            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
+    explain("文字化けの診断（必要なときだけ実行）",
+            "返答が文字化けする場合に、同じ質問を Ollama の 3 つの方式（通常 / JSON モード / 構造化出力）で送り、どの方式で文字化けが出るかを表示する。"
+            "構造化出力でだけ文字化けする場合は、設定の OLLAMA_FORMAT を \"none\" にする。全方式で出る場合は、Ollama・モデル側の問題の可能性がある",
+            "設定の OLLAMA_MODEL・OLLAMA_NUM_CTX（Ollama が起動していること）", "各方式の返答と、文字化けの有無（画面表示のみ）"),
+    code("# 3 つの方式で同じ質問を送り、返答の文字化けの有無を表示する(BACKEND が ollama の場合のみ)。\n"
+         "diagnose_ollama(OLLAMA_MODEL, num_ctx=OLLAMA_NUM_CTX)"),
 ]
 nb = nbf.v4.new_notebook(cells=cells)
 nb.metadata["kernelspec"] = {"display_name": "Python 3", "language": "python", "name": "python3"}

@@ -3,7 +3,8 @@
 作業の流れ:
  1. keyword_snippets: 本文から、調べたいことの関連語の周辺を抜粋する(本文が長いため)
  2. build_prompt    : 調べたいこと + 判定基準 + 特許の本文(抜粋)から、LLM に渡す文章を作る
- 3. バックエンド    : ollama_backend(この PC) / guidance_backend(サーバー)で LLM に判定させる
+ 3. バックエンド    : ollama_backend(この PC) / guidance_backend(サーバー)で LLM に判定させる。生成の様子は 1 語ずつ画面に出せる
+    返答は、文字化け(UTF-8 が Latin-1 として読まれた「ï»¿」「ã」型)を検出して補正し、JSON の形も検査する
  4. check_evidence  : LLM が出した「根拠の引用」が原文に実在するかを確認する
  5. evaluate_table  : 上を全件に繰り返し、関連度の高い順の結果表を返す(発明内容概要・出願企業も付ける)
  6. save_evaluation_excel: 結果表を Excel に保存する(文献番号は Google Patents へのリンク)
@@ -151,39 +152,203 @@ def build_prompt(topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) ->
 
 # ---- バックエンド: (system, user, schema) -> JSON 文字列 -------------------------------
 
-# 作業: Ollama(この PC)に問い合わせる関数を作る。出力は JSON スキーマで制約される。
-def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434", num_ctx: int = 8192) -> Callable:
+# ---- 返答の検査と補正 -------------------------------------------------------------------------
+
+# UTF-8 の文字が Latin-1 / cp1252 として読まれた文字化け(例: 「（」→「ï¼ˆ」、「あ」→「ã\x81\x82」)に現れる文字。
+_CP1252_EXTRA = "".join(bytes([b]).decode("cp1252", errors="ignore") for b in range(0x80, 0xA0))  # € ‚ ƒ … ™ – — など
+_MOJI_CHARS = "\u0080-\u00ff" + re.escape(_CP1252_EXTRA)
+_MOJI_RUN = re.compile("[" + _MOJI_CHARS + "]+")
+_MOJI_SIGN = re.compile("[\u00c2-\u00f4][" + _MOJI_CHARS + "]")
+
+
+# 作業: 文字化け(UTF-8 の文字が Latin-1 として読まれた形)が含まれているかを判定する。
+def looks_garbled(text: str) -> bool:
+    return isinstance(text, str) and (len(_MOJI_SIGN.findall(text)) >= 2 or "\u00ef\u00bb\u00bf" in text)
+
+
+def _run_to_bytes(run: str) -> bytes:
+    out = bytearray()
+    for ch in run:
+        out += bytes([ord(ch)]) if ord(ch) <= 0xFF else ch.encode("cp1252")
+    return bytes(out)
+
+
+# 作業: 文字化けを元の文字に戻す。文字化けした部分だけを、UTF-8 のバイト列として読み直す。戻せない部分はそのまま残す。
+def repair_mojibake(text: str) -> str:
+    if not looks_garbled(text):
+        return text
+
+    def fix(m: re.Match) -> str:
+        try:
+            return _run_to_bytes(m.group(0)).decode("utf-8").replace("\ufeff", "")  # BOM(ゼロ幅の文字)は除く
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return m.group(0)
+
+    return _MOJI_RUN.sub(fix, text)
+
+
+# 作業: 返答の文章から JSON の部分だけを取り出す(前後の説明文や ```json で囲まれていても読めるようにする)。
+def extract_json(text: str) -> str:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("返答に JSON(波括弧)が見つかりません")
+    return text[start: end + 1]
+
+
+_JUDGEMENT_BY_SCORE = {3: "直接関連", 2: "関連あり", 1: "わずかに関連", 0: "無関係"}
+
+
+# 作業: 返答の JSON が期待どおりの形かを検査し、整える(関連度は 0〜3、判定が無ければ関連度から補う、長さを制限する)。
+def validate_output(out) -> dict:
+    if not isinstance(out, dict):
+        raise ValueError("JSON がオブジェクトではありません")
+    try:
+        score = int(out["score"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("score(関連度)がありません、または整数ではありません") from None
+    if score not in _JUDGEMENT_BY_SCORE:
+        raise ValueError(f"score が 0〜3 の範囲外です: {score}")
+    clean = lambda v: str(v).replace("\ufeff", "").strip()  # BOM(ゼロ幅の文字)を除く
+    judgement = out.get("judgement")
+    ev = out.get("evidence") or []
+    return {
+        "score": score,
+        "judgement": judgement if judgement in _JUDGEMENT_BY_SCORE.values() else _JUDGEMENT_BY_SCORE[score],
+        "reason": clean(out.get("reason", ""))[:300],
+        "summary": clean(out.get("summary", ""))[:220],
+        "evidence": [clean(e)[:200] for e in (ev if isinstance(ev, list) else [ev])][:3],
+    }
+
+
+# ---- バックエンド: (system, user, schema, on_token=None) -> JSON 文字列 ----------------------------
+# on_token を渡すと、生成された文字が出るたびにそれを呼ぶ(画面にリアルタイム表示するため)。
+
+# Ollama の構造化出力を使わない場合に、プロンプトの末尾へ足す出力形式の指示。
+FORMAT_NOTE = (
+    "\n\n# 出力形式\n次のキーを持つ JSON オブジェクトだけを出力する"
+    "(前後に説明文・コードブロック・思考過程を付けない)。\n"
+    '{"score": 0〜3の整数, "judgement": "直接関連|関連あり|わずかに関連|無関係", '
+    '"reason": "理由", "summary": "発明内容概要", "evidence": ["本文からの引用"]}'
+)
+
+
+# 作業: Ollama(この PC)に問い合わせる関数を作る。返答は 1 行ずつ UTF-8 として読み、生成の様子を on_token に流す。
+# mode: "none"(構造化出力を使わず、プロンプトで JSON を指示。読めなければやり直す) /
+#       "json"(Ollama の JSON モード) / "schema"(Ollama の構造化出力。環境によって文字化けが出ることがある)
+def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434", num_ctx: int = 8192,
+                   mode: str = "none", retries: int = 2) -> Callable:
     import requests
 
-    def run(system: str, user: str, schema: dict) -> str:
-        r = requests.post(f"{host}/api/chat", timeout=600, json={
-            "model": model, "stream": False, "think": False, "format": schema,
-            "options": {"temperature": 0, "num_ctx": num_ctx},
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        })
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+    def one_call(system: str, user: str, schema: dict, on_token) -> str:
+        body = {"model": model, "stream": True, "think": False, "options": {"temperature": 0, "num_ctx": num_ctx},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if mode == "schema":
+            body["format"] = schema
+        elif mode == "json":
+            body["format"] = "json"
+        pieces = []
+        with requests.post(f"{host}/api/chat", json=body, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():  # bytes のまま受け取り、こちらで UTF-8 として読む(文字コードの推測をさせない)
+                if not line:
+                    continue
+                d = json.loads(line.decode("utf-8"))
+                if d.get("error"):
+                    raise ValueError(f"Ollama のエラー: {d['error']}")
+                piece = (d.get("message") or {}).get("content", "")
+                if piece:
+                    pieces.append(piece)
+                    if on_token:
+                        on_token(piece)
+        return "".join(pieces)
+
+    def run(system: str, user: str, schema: dict, on_token=None) -> str:
+        if mode == "schema":
+            return one_call(system, user, schema, on_token)
+        last = None
+        for attempt in range(retries + 1):
+            if attempt and on_token:
+                on_token("\n(JSON として読めなかったため、やり直します)\n")
+            raw = one_call(system, user + FORMAT_NOTE, schema, on_token)
+            try:
+                validate_output(json.loads(extract_json(raw)))
+                return raw
+            except ValueError as e:  # JSONDecodeError も含む
+                last = e
+        raise ValueError(f"JSON を得られませんでした: {last}")
 
     return run
 
 
 # 作業: guidance(Hugging Face のモデル、サーバー用)に問い合わせる関数を作る。出力は JSON 文法で制約される。
+# 生成の様子は、可能なら 1 語ずつ on_token に流す(できない場合は、終わってからまとめて流す)。
 def guidance_backend(lm) -> Callable:
     """lm: guidance のモデル。例: guidance.models.Transformers("Qwen/Qwen3-14B", device_map="auto")。"""
     from guidance import assistant, system as system_role, user as user_role
     from guidance import json as gjson
 
-    def run(system: str, user: str, schema: dict) -> str:
-        m = lm
+    def build(m, system: str, user: str, schema: dict, with_json: bool):
         with system_role():
             m += system
         with user_role():
             m += user
         with assistant():
-            m += gjson(name="out", schema=schema)
-        return m["out"]
+            if with_json:
+                m += gjson(name="out", schema=schema)
+        return m
+
+    def run(system: str, user: str, schema: dict, on_token=None) -> str:
+        if on_token is not None:
+            try:
+                last, prev = None, None
+                for part in build(lm.stream(), system, user, schema, with_json=True):
+                    last, text = part, str(part)
+                    if prev is None:
+                        # 最初の状態には、プロンプトも含まれる。ユーザー発話の末尾より後ろ(+ assistant の見出しの後ろ)だけを出す
+                        k = text.rfind(user[-30:])
+                        rest = text[k + len(user[-30:]):] if k >= 0 else ""
+                        j = rest.rfind("assistant\n")
+                        new = rest[j + len("assistant\n"):] if j >= 0 else rest
+                    else:
+                        new = text[len(prev):] if text.startswith(prev) else ""
+                    if new:
+                        on_token(new)
+                    prev = text
+                return last["out"]
+            except Exception:  # ストリーミングに失敗した場合は、通常の生成にする
+                pass
+        out = build(lm, system, user, schema, with_json=True)["out"]
+        if on_token:
+            on_token(out)
+        return out
 
     return run
+
+
+# 作業: 文字化けの原因を切り分ける診断。同じ質問を、Ollama の 3 つの方式(通常 / JSON モード / 構造化出力)で送り、
+# 返答の文字化けの有無を表示する。どの方式で文字化けが出るかで、OLLAMA_FORMAT の選び方が決まる。
+def diagnose_ollama(model: str = "qwen3:14b", host: str = "http://localhost:11434", num_ctx: int = 8192) -> None:
+    import requests
+
+    try:
+        print("Ollama のバージョン:", requests.get(f"{host}/api/version", timeout=10).json().get("version"))
+    except Exception as e:  # 接続できない場合は、その旨だけ表示して終わる
+        print("Ollama に接続できません:", type(e).__name__, e)
+        return
+    question = "「全RNA」と「mRNA」の違いを、全角の括弧（）を一度は使って、一文で説明してください。"
+    small_schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+    for name, fmt in [("通常(format なし)", None), ("JSON モード(format=json)", "json"),
+                      ("構造化出力(format=スキーマ)", small_schema)]:
+        body = {"model": model, "stream": False, "think": False, "options": {"temperature": 0, "num_ctx": num_ctx},
+                "messages": [{"role": "user", "content": question + ("" if fmt is None else ' JSON {"answer": "..."} で答えること。')}]}
+        if fmt is not None:
+            body["format"] = fmt
+        r = requests.post(f"{host}/api/chat", json=body, timeout=300)
+        text = json.loads(r.content.decode("utf-8"))["message"]["content"]
+        print(f"\n■ {name}\n  Content-Type: {r.headers.get('Content-Type')}\n  返答: {text[:150]!r}")
+        print("  文字化けの疑い:", "あり" if looks_garbled(text) else "なし")
+        if looks_garbled(text):
+            print("  補正後:", repair_mojibake(text)[:150])
 
 
 # ---- 評価 ----------------------------------------------------------------------------
@@ -199,19 +364,30 @@ def check_evidence(evidence: list[str], source: str) -> str:
     return "全て原文に存在" if ok == len(evidence) else f"原文に無い引用あり({len(evidence) - ok}/{len(evidence)})"
 
 
-# 作業: 1 件を評価する(プロンプト作成 → LLM → JSON の読み取り → 引用の検証)。
-def evaluate_one(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000) -> dict:
+# 作業: 1 件を評価する(プロンプト作成 → LLM → JSON の検査 → 文字化けの補正 → 引用の検証)。
+# on_token を渡すと、LLM の生成を 1 語ずつ on_token に流す。
+def evaluate_one(backend: Callable, topic: Topic, doc_no: str, rec: dict, max_chars: int = 6000, on_token=None) -> dict:
     prompt, hits = build_prompt(topic, doc_no, rec, max_chars)
     try:
-        out = json.loads(backend(SYSTEM, prompt, SCHEMA))
+        raw = backend(SYSTEM, prompt, SCHEMA) if on_token is None else backend(SYSTEM, prompt, SCHEMA, on_token=on_token)
+        out = validate_output(json.loads(extract_json(raw)))
     except (json.JSONDecodeError, KeyError, ValueError) as e:
         return {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "summary": "",
                 "evidence": [], "evidence_check": "", "keyword_hits": hits}
+    # 文字化け(UTF-8 が Latin-1 として読まれた形)があれば直す。直したことは理由に残す
+    fixed = {k: repair_mojibake(out[k]) for k in ("reason", "summary")}
+    fixed["evidence"] = [repair_mojibake(e) for e in out["evidence"]]
+    repaired = fixed != {k: out[k] for k in fixed}
+    out.update(fixed)
     source = rec["abstract_nfkc"] + rec["claims_nfkc"] + rec["description_nfkc"]
-    out["evidence_check"] = check_evidence(out.get("evidence", []), source)
+    out["evidence_check"] = check_evidence(out["evidence"], source)
+    if looks_garbled(out["reason"] + out["summary"] + "".join(out["evidence"])):
+        out["evidence_check"] += " / 文字化けの疑い"
     out["keyword_hits"] = hits
+    if repaired:
+        out["reason"] = "【文字化けを補正】" + out["reason"]
     if is_abstract_only(rec):  # 結果の表で、要約だけで判定したと分かるようにする
-        out["reason"] = "【要約のみで判定】" + out.get("reason", "")
+        out["reason"] = "【要約のみで判定】" + out["reason"]
     return out
 
 
@@ -255,7 +431,9 @@ def company_name(applicant, aliases: dict | None = None) -> str:
 
 
 # 作業: 文献番号表の各行を、全文 JSON(text_dir/{ID}.json)で評価し、FINAL_COLUMNS の順の結果表を返す。
-def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None):
+# stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。
+def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None,
+                   stream: bool = False):
     from pathlib import Path
 
     import pandas as pd
@@ -277,8 +455,11 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         jp_url = r.get("J-PlatPat URL")
         if rec.get("source") == "csv_abstract" and isinstance(jp_url, str) and jp_url:
             base["リンク"] = jp_url
+        if stream:  # 生成の様子を、1 語ずつ画面に出す
+            print(f"\n━━ {r['文献番号']}  {r.get('発明の名称') or ''}", flush=True)
         try:
-            o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars)
+            o = evaluate_one(backend, topic, r["文献番号"], rec, max_chars,
+                             on_token=(lambda t: print(t, end="", flush=True)) if stream else None)
         # 接続断などでも、1 件の失敗で全体を止めず、失敗として記録して次へ進む
         except Exception as e:
             o = {"score": None, "judgement": "判定失敗", "reason": f"{type(e).__name__}: {e}", "summary": "",
@@ -288,7 +469,7 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         rows.append({**base, "関連度": o["score"], "判定": o["judgement"], "理由": o["reason"],
                      "根拠の引用": " / ".join(o["evidence"]), "引用の検証": o["evidence_check"],
                      "関連語ヒット数": o["keyword_hits"], "発明内容概要": summary})
-        print(r["文献番号"], o["score"], o["judgement"], flush=True)
+        print(("\n→ " if stream else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
     df = pd.DataFrame(rows)
     for c in FINAL_COLUMNS + ["リンク"]:
         if c not in df:
