@@ -205,6 +205,9 @@ def extract_json(text: str) -> str:
 
 _JUDGEMENT_BY_SCORE = {3: "直接関連", 2: "関連あり", 1: "わずかに関連", 0: "無関係"}
 
+# 出力形式の雛形をそのまま写した値(過去の指示に使っていた語を含む)。これらだけの返答は、中身がないものとして扱う。
+PLACEHOLDERS = {"理由", "発明内容概要", "本文からの引用", "要約", "引用", "reason", "summary", "evidence", "...", "…", ""}
+
 
 # 作業: 返答の JSON が期待どおりの形かを検査し、整える(関連度は 0〜3、判定が無ければ関連度から補う、長さを制限する)。
 def validate_output(out) -> dict:
@@ -219,12 +222,18 @@ def validate_output(out) -> dict:
     clean = lambda v: str(v).replace("\ufeff", "").strip()  # BOM(ゼロ幅の文字)を除く
     judgement = out.get("judgement")
     ev = out.get("evidence") or []
+    reason = clean(out.get("reason", ""))
+    if reason in PLACEHOLDERS:  # 雛形をそのまま返した場合は、やり直しの対象にする(none 方式では自動でやり直す)
+        raise ValueError(f"reason(理由)が空、または雛形のままです: {reason!r}")
+    summary = clean(out.get("summary", ""))
+    if reason == FORMAT_EXAMPLE["reason"] or summary == FORMAT_EXAMPLE["summary"]:  # 見本の文章をそのまま写した場合
+        raise ValueError("出力形式の見本の文章をそのまま写しています")
     return {
         "score": score,
         "judgement": judgement if judgement in _JUDGEMENT_BY_SCORE.values() else _JUDGEMENT_BY_SCORE[score],
-        "reason": clean(out.get("reason", ""))[:300],
-        "summary": clean(out.get("summary", ""))[:220],
-        "evidence": [clean(e)[:200] for e in (ev if isinstance(ev, list) else [ev])][:3],
+        "reason": reason[:300],
+        "summary": "" if summary in PLACEHOLDERS else summary[:220],  # 空なら、結果の表で要約から補う
+        "evidence": [e[:200] for e in (clean(e) for e in (ev if isinstance(ev, list) else [ev])) if e not in PLACEHOLDERS][:3],
     }
 
 
@@ -232,11 +241,25 @@ def validate_output(out) -> dict:
 # on_token を渡すと、生成された文字が出るたびにそれを呼ぶ(画面にリアルタイム表示するため)。
 
 # Ollama の構造化出力を使わない場合に、プロンプトの末尾へ足す出力形式の指示。
+# 注意: 「"reason": "理由"」のような雛形を書くと、LLM がその値をそのまま写してしまう(実際に起きた)。
+# そのため、各キーの書き方は文章で説明し、見本は、調べたいことと無関係な分野(電池)の具体的な文章にする。
+FORMAT_EXAMPLE = {
+    "score": 2, "judgement": "関連あり",
+    "reason": "実施例2で、正極活物質を被覆した電極を用いて電池を試作しており、テーマの定義に当たる手法を実際に使っている。"
+              "ただし請求項の中心は電解液であり、手法そのものが発明の中心ではない。",
+    "summary": "正極活物質の表面を被覆して、充放電を繰り返しても容量が下がりにくい電池を得る方法。",
+    "evidence": ["正極活物質の表面を被覆した電極を用いて電池を作製した"],
+}
 FORMAT_NOTE = (
-    "\n\n# 出力形式\n次のキーを持つ JSON オブジェクトだけを出力する"
-    "(前後に説明文・コードブロック・思考過程を付けない)。\n"
-    '{"score": 0〜3の整数, "judgement": "直接関連|関連あり|わずかに関連|無関係", '
-    '"reason": "理由", "summary": "発明内容概要", "evidence": ["本文からの引用"]}'
+    "\n\n# 出力形式\n次の 5 つのキーを持つ JSON オブジェクトだけを出力する(前後に説明文・コードブロック・思考過程を付けない)。\n"
+    "- score: 0〜3 の整数\n"
+    "- judgement: 直接関連、関連あり、わずかに関連、無関係 のいずれか(score に対応させる)\n"
+    "- reason: この特許の、どの記述が、テーマの定義・条件のどれに当たる(または当たらない)かを、100〜200字の日本語で具体的に書く。"
+    "「理由」などの一般的な語だけにしない\n"
+    "- summary: この特許の発明の内容(何を、どうする発明か)を、専門外の人にも分かる日本語で100〜150字にまとめる\n"
+    "- evidence: 上の本文からそのまま抜き出した短い引用の配列(最大3件)。無ければ空の配列\n\n"
+    "次は、形式だけの参考例である(調べたいこととは無関係な分野の例なので、内容は写さず、この特許に合わせて書くこと)。\n"
+    + json.dumps(FORMAT_EXAMPLE, ensure_ascii=False)
 )
 
 
@@ -276,7 +299,7 @@ def ollama_backend(model: str = "qwen3:14b", host: str = "http://localhost:11434
         last = None
         for attempt in range(retries + 1):
             if attempt and on_token:
-                on_token("\n(JSON として読めなかったため、やり直します)\n")
+                on_token("\n(返答が読めない、または雛形のままだったため、やり直します)\n")
             raw = one_call(system, user + FORMAT_NOTE, schema, on_token)
             try:
                 validate_output(json.loads(extract_json(raw)))

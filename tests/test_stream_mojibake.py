@@ -201,7 +201,7 @@ def test_render_prompt_includes_system_user_and_backend_note():
     text = render_prompt(ollama_backend(mode="none"), TOPIC, "特開1", REC)
     i, j = text.index("【システムプロンプト】"), text.index("【ユーザープロンプト】")
     assert i < j and "あなたは特許調査の専門家" in text and "# 調査テーマ\nTOTAL-RNA-seq" in text
-    assert "# 出力形式" in text and text.rstrip().endswith('"evidence": ["本文からの引用"]}')  # 渡る文章の末尾まで
+    assert evaluate.FORMAT_NOTE in text and text.endswith(evaluate.FORMAT_NOTE)  # 渡る文章の末尾まで(出力形式の指示)
     # 構造化出力(schema)では、出力形式の指示は足されない。バックエンドの指定が無ければ(guidance など)足さない
     assert "# 出力形式" not in render_prompt(ollama_backend(mode="schema"), TOPIC, "特開1", REC)
     assert "# 出力形式" not in render_prompt(lambda *a, **k: "", TOPIC, "特開1", REC)
@@ -219,3 +219,50 @@ def test_evaluate_table_does_not_print_prompt(capsys, tmp_path, monkeypatch):
     assert "━━ 特開1  名称A" in screen and '"score": 2' in screen  # 生成の様子だけ出る
 
 
+
+
+def test_format_note_has_no_fillable_placeholders():
+    # 「"reason": "理由"」のような雛形を見本にすると、LLM が値をそのまま写す(実際に起きた不具合)
+    note = evaluate.FORMAT_NOTE
+    for bad in ('"reason": "理由"', '"summary": "発明内容概要"', '"本文からの引用"', "0〜3の整数,"):
+        assert bad not in note
+    example = json.loads(note[note.index('{"score": 2'):])  # 見本は、読める JSON で、中身のある文章になっている
+    assert example["reason"] not in evaluate.PLACEHOLDERS and len(example["reason"]) > 30
+    assert "RNA" not in json.dumps(example, ensure_ascii=False)  # 調べたいことと無関係な分野の例
+
+
+def test_validate_rejects_placeholder_reason_and_cleans_others():
+    for bad in ("理由", "reason", "", "…", " 理由 "):
+        with pytest.raises(ValueError, match="雛形"):
+            validate_output({"score": 1, "reason": bad})
+    ok = validate_output({"score": 1, "reason": "実施例で使っている", "summary": "発明内容概要",
+                          "evidence": ["本文からの引用", "実際の引用", ""]})
+    assert ok["summary"] == "" and ok["evidence"] == ["実際の引用"]  # 雛形の概要・引用は捨てる
+
+
+def test_ollama_retries_when_llm_copies_the_placeholder(monkeypatch):
+    import requests
+
+    answers = iter([{"score": 1, "judgement": "わずかに関連", "reason": "理由", "summary": "発明内容概要", "evidence": ["本文からの引用"]},
+                    GOOD])
+    n = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: n.append(1) or FakeResponse([json.dumps(next(answers), ensure_ascii=False)]))
+    out = json.loads(ollama_backend(mode="none")("s", "u", SCHEMA))
+    assert out["reason"] == "実施例で使用" and len(n) == 2  # 1 回目は雛形のまま → やり直して、2 回目の答えを採用
+
+
+def test_evaluate_one_reports_placeholder_as_failure_in_other_modes():
+    bad = {"score": 1, "judgement": "わずかに関連", "reason": "理由", "summary": "発明内容概要", "evidence": []}
+    out = evaluate_one(lambda *a, **k: json.dumps(bad, ensure_ascii=False), TOPIC, "特開X", REC)
+    assert out["judgement"] == "判定失敗" and "雛形" in out["reason"]  # 黙って「理由」と表に載せない
+
+
+def test_copying_the_format_example_is_rejected_and_retried(monkeypatch):
+    import requests
+
+    answers = iter([dict(evaluate.FORMAT_EXAMPLE), GOOD])  # 1 回目は、見本をそのまま写した答え
+    n = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: n.append(1) or FakeResponse([json.dumps(next(answers), ensure_ascii=False)]))
+    assert json.loads(ollama_backend(mode="none")("s", "u", SCHEMA))["reason"] == "実施例で使用" and len(n) == 2
+    with pytest.raises(ValueError, match="見本"):
+        validate_output(dict(evaluate.FORMAT_EXAMPLE))
