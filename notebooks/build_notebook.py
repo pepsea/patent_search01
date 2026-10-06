@@ -1,4 +1,5 @@
 """notebooks/patent_pipeline.ipynb を patent_search/ のソースから生成する（ソースとの食い違いを防ぐ）。"""
+import hashlib
 from pathlib import Path
 
 import nbformat as nbf
@@ -10,8 +11,14 @@ evaluate_src = (root / "patent_search/evaluate.py").read_text(encoding="utf-8")
 fetch_src = (root / "patent_search/fetch_google.py").read_text(encoding="utf-8")
 fetch_src = fetch_src[: fetch_src.index("def main()")].rstrip() + "\n"
 
+# ノートブックの版。埋め込むコード全体のハッシュなので、コードが変わると必ず変わる(手元のノートブックが古いかを確かめるため)。
+VERSION = hashlib.sha1("".join([platpat, runs_src, fetch_src, evaluate_src]).encode("utf-8")).hexdigest()[:7]
+
 SETTINGS = '''from pathlib import Path
 import json
+
+# このノートブックの版(コードを更新すると変わる)。手元のノートブックが最新かを確かめるための値で、書き換えない。
+NOTEBOOK_VERSION = "__VERSION__"
 
 # ================= 手順1・2 の設定 =================
 
@@ -129,6 +136,7 @@ save_run_settings(run_dir, {
     "num_ctx": OLLAMA_NUM_CTX, "Ollamaの返答方式": OLLAMA_FORMAT, "本文の最大文字数": MAX_CHARS, "取得件数(LIMIT)": LIMIT, "評価件数(EVAL_LIMIT)": EVAL_LIMIT,
     "取得間隔(秒)": DELAY, "入力フォルダ": INPUT_DIR, "入力形式": INPUT_FORMAT, "入力ファイル": copied, "出願企業の別名": COMPANY_ALIASES,
 })
+print("ノートブックの版:", NOTEBOOK_VERSION)
 print("調査フォルダ:", run_dir)'''
 
 STEP1_RUN = '''import pandas as pd
@@ -179,7 +187,8 @@ print('->', RESULT_XLSX)
 # 取得状況・抽出状況などの要点だけを表示する。
 result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状況', '請求項数'] if c in result]]"""
 
-STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
+STEP3_RUN = """print("ノートブックの版:", NOTEBOOK_VERSION)
+# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
 # 評価の前に、全文 JSON がある特許の数を確認する(1 件もなければ、原因と対処を表示して止まる)。
 check_texts(targets3, TEXT_DIR, RESULTS_ROOT, run_dir)
@@ -208,6 +217,7 @@ cells = [
        "1. 指定フォルダ内の J-PlatPat 検索結果（コピーしたテキスト txt、またはダウンロードした csv。どちらも複数可）を統合し、重複を除いた文献番号表を作る\n"
        "2. 文献番号から Google Patents（日本語ページ）の HTML を取得し、名称・要約・請求項・明細書を Excel に出力する（取得できない場合は、csv の要約で代用）\n"
        "3. ローカル LLM で、各特許が「調べたいこと」に関連するかを評価して表にする\n\n"
+       f"**このノートブックの版: `{VERSION}`**（コードを更新すると変わります。手元の画面に出る「ノートブックの版」と同じか確認してください）\n\n"
        "**使い方**: 上から順に実行。まず設定セルの値を変更し、手順2・3は `LIMIT` / `EVAL_LIMIT = 3` などで少数件を試してから全件にしてください。\n\n"
        "**各セルの説明は、そのセルの上にあります。** プログラム本体のセル（タイトルが「プログラム○」のもの）は、先頭にそのプログラムの作業の流れが書いてあります。\n\n"
        "注意: Google Patents の自動取得は利用規約上の制限を受け得ます。`DELAY` を空けて、必要な件数だけ実行してください。"),
@@ -220,7 +230,7 @@ cells = [
     explain("設定（調べたいことはここに書く）",
             "フォルダ・出力先・件数などの設定と、手順3の「調べたいこと」、使う LLM を決める。各設定の上にその意味を書いてある",
             "あなたが書き換える値", "なし(以降のセルが、ここの値を使う)"),
-    code(SETTINGS),
+    code(SETTINGS.replace("__VERSION__", VERSION)),
 
     md("## 調査フォルダの作成"),
     explain("プログラム0: 調査フォルダの作成と登録",
@@ -295,5 +305,6 @@ cells = [
 ]
 nb = nbf.v4.new_notebook(cells=cells)
 nb.metadata["kernelspec"] = {"display_name": "Python 3", "language": "python", "name": "python3"}
-nbf.write(nb, root / "notebooks/patent_pipeline.ipynb")
-print("written")
+if __name__ == "__main__":
+    nbf.write(nb, root / "notebooks/patent_pipeline.ipynb")
+    print("written", VERSION)
