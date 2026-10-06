@@ -439,6 +439,38 @@ def company_name(applicant, aliases: dict | None = None) -> str:
     return (aliases or {}).get(name, name)
 
 
+# 作業: 評価の前に、全文 JSON が何件あるかを確認して表示する。1 件も無ければ、考えられる原因と対処を表示して止まる
+# (LLM を呼ばずに「本文なし」だけの結果表を作ってしまうのを防ぐ)。
+def check_texts(numbers, text_dir, results_root=None, run_dir=None) -> int:
+    from pathlib import Path
+
+    ids = [r.get("Google Patents ID(推定)") for _, r in numbers.iterrows()]
+    have = [i for i in ids if (Path(text_dir) / f"{i}.json").exists()]
+    print(f"評価の対象 {len(ids)} 件のうち、全文 JSON がある特許: {len(have)} 件(保存先: {text_dir})")
+    if len(have) == len(ids):
+        return len(have)
+    missing = [str(r["文献番号"]) for (_, r), i in zip(numbers.iterrows(), ids) if i not in have]
+    print(f"  全文 JSON がない特許: {len(missing)} 件(例: {', '.join(missing[:5])})。これらは評価されず、「本文なし(未取得)」になります")
+    if have:
+        return len(have)
+    lines = ["全文 JSON が 1 件もないため、評価できません。次を確認してください。",
+             "  1. 手順2(セル11)を実行しましたか。実行後の表の「取得状況」「抽出状況」で、取得に失敗していないかを確認してください。",
+             "     取得できず、入力が txt の場合は、本文も要約も得られません(csv なら要約で代用できます)。"]
+    if results_root:  # 他の調査フォルダに、全文 JSON があるかを探す(セル4を再実行して、フォルダが変わった場合)
+        current = Path(run_dir).resolve() if run_dir else None
+        others = []
+        for d in Path(results_root).glob("*/text"):
+            n = len(list(d.glob("*.json")))
+            if n and d.parent.resolve() != current:
+                others.append((d.parent.stat().st_mtime, d.parent.name, n))
+        if others:
+            lines.append("  2. 調査フォルダが変わった可能性があります(セル4を再実行すると、新しい空のフォルダができます)。全文 JSON がある別のフォルダ:")
+            for _, name, n in sorted(others, reverse=True)[:5]:
+                lines.append(f'       RUN_DIR = "{name}"   ({n} 件)')
+            lines.append("     設定セルの RUN_DIR にそのフォルダ名を入れて、セル4 から実行し直してください。")
+    raise RuntimeError("\n".join(lines))
+
+
 # 作業: 文献番号表の各行を、全文 JSON(text_dir/{ID}.json)で評価し、FINAL_COLUMNS の順の結果表を返す。
 # stream=True なら、LLM の生成の様子をリアルタイムで画面に出す。
 def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars: int = 6000, aliases: dict | None = None,
@@ -457,7 +489,10 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
                 "出願人・権利者": f"{applicant}{more}" if isinstance(applicant, str) else "",
                 "出願企業": company_name(applicant, aliases), "ステータス": r.get("ステータス")}
         if not path.exists():
-            rows.append({**base, "判定": "本文なし(未取得)"})
+            rows.append({**base, "判定": "本文なし(未取得)",
+                         "理由": f"LLM で評価していません。全文 JSON がありません({path.name})。手順2(セル11)で本文も CSV の要約も得られていません"})
+            if stream:
+                print(f"\n━━ {r['文献番号']}  → 全文 JSON なし。評価を飛ばしました", flush=True)
             continue
         rec = json.loads(path.read_text(encoding="utf-8"))
         # 要約で代用した行は Google Patents のページが無い(404 など)ので、リンクを J-PlatPat の URL に替える
@@ -478,7 +513,8 @@ def evaluate_table(backend: Callable, topic: Topic, numbers, text_dir, max_chars
         rows.append({**base, "関連度": o["score"], "判定": o["judgement"], "理由": o["reason"],
                      "根拠の引用": " / ".join(o["evidence"]), "引用の検証": o["evidence_check"],
                      "関連語ヒット数": o["keyword_hits"], "発明内容概要": summary})
-        print(("\n→ " if stream else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}", flush=True)
+        print(("\n→ " if stream else "") + f"{r['文献番号']} 関連度={o['score']} {o['judgement']}"
+              + (f"  理由: {o['reason']}" if o["judgement"] == "判定失敗" else ""), flush=True)
     df = pd.DataFrame(rows)
     for c in FINAL_COLUMNS + ["リンク"]:
         if c not in df:

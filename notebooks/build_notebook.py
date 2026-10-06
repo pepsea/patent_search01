@@ -107,7 +107,12 @@ INPUT_PATTERNS = {"txt": ["*.txt"], "csv": ["*.csv"], "both": ["*.txt", "*.csv"]
 Path(RESULTS_ROOT).mkdir(exist_ok=True)'''
 
 RUN_CELL = '''# 調査フォルダ「トピック名_日時」を作る(RUN_DIR を指定した場合は、その既存フォルダを使う)。
-run_dir = make_run_dir(RESULTS_ROOT, TOPIC_NAME, RUN_DIR)
+# 同じ起動中にこのセルを再実行した場合(RUN_DIR が None で、同じトピックの調査フォルダが直前にできている場合)は、
+# 新しい空のフォルダを作らず、直前のフォルダを続けて使う。新しく作り直したい場合は、カーネルを再起動する。
+if RUN_DIR is None and "run_dir" in globals() and Path(run_dir).is_dir() and Path(run_dir).name.startswith(safe_name(TOPIC_NAME) + "_"):
+    print("直前の調査フォルダを続けて使います(新しく作る場合は、カーネルを再起動してください)")
+else:
+    run_dir = make_run_dir(RESULTS_ROOT, TOPIC_NAME, RUN_DIR)
 # 入力のファイル(txt / csv)を、調査フォルダの input/ にコピーして残す。
 copied = register_inputs(run_dir, INPUT_DIR, INPUT_PATTERNS)
 # 以降のセルが使う出力先を、すべて調査フォルダの中に決める(ファイル名にトピック名は使わない)。
@@ -176,6 +181,8 @@ result[[c for c in ['文献番号', 'ID', '使用ID', '取得状況', '抽出状
 
 STEP3_RUN = """# EVAL_LIMIT が None なら全件、数字ならその件数だけを対象にする。
 targets3 = numbers if EVAL_LIMIT is None else numbers.head(EVAL_LIMIT)
+# 評価の前に、全文 JSON がある特許の数を確認する(1 件もなければ、原因と対処を表示して止まる)。
+check_texts(targets3, TEXT_DIR, RESULTS_ROOT, run_dir)
 # LLM で 1 件ずつ評価し、結果の表を受け取る。STREAM が True なら、生成の様子がリアルタイムで表示される。
 evaluation = evaluate_table(backend, topic, targets3, TEXT_DIR, MAX_CHARS, COMPANY_ALIASES, stream=STREAM)
 # 結果を Excel に保存する(文献番号をクリックで Google Patents が開く。列と順番は固定)。
@@ -221,7 +228,7 @@ cells = [
             "なし(関数を定義するだけ)", "なし(次のセルで使う関数 make_run_dir などができる)"),
     code(runs_src),
     explain("調査フォルダの作成",
-            "設定のトピック名と現在の日時で調査フォルダを作り、入力の txt を input/ にコピーし、設定を run_settings.json に保存する。"
+            "設定のトピック名と現在の日時で調査フォルダを作り(同じ起動中に再実行した場合は、同じトピックの直前のフォルダを続けて使う)、入力の txt を input/ にコピーし、設定を run_settings.json に保存する。"
             "以降の出力は、すべてこのフォルダの中に入る(html/ text/ patent_numbers.xlsx patents_text.xlsx evaluation.xlsx)",
             "設定のトピック名・RUN_DIR・各設定、INPUT_DIR の txt / csv", "調査フォルダ、run_dir、各出力ファイルの場所(NUMBERS_XLSX など)"),
     code(RUN_CELL),
@@ -276,7 +283,7 @@ cells = [
             "設定の BACKEND・TOPIC_*、調査フォルダ内 text/ の全文 JSON", "backend、topic、プロンプトの見本(画面表示)"),
     code(BACKEND_CELL),
     explain("手順3の実行: 評価",
-            "一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する（プロンプトは表示しない。確認は直前のセル）。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
+            "まず、評価する特許のうち全文 JSON がある件数を確認する(1 件もなければ、原因と対処を表示して止まる)。そのうえで、一覧の先頭から EVAL_LIMIT 件を LLM で評価する。設定の STREAM が True なら、LLM が生成している様子を 1 語ずつリアルタイムで表示する（プロンプトは表示しない。確認は直前のセル）。結果は、関連度の高い順の Excel にする。列は、文献番号(Google Patents へのリンク。csv の要約で代用した行だけ J-PlatPat へのリンク)、判定、関連度、関連語ヒット数、理由、引用の検証、根拠の引用、発明の名称、出願人・権利者、出願企業、ステータス、発明内容概要",
             "numbers、調査フォルダ内 text/ の全文 JSON、backend、topic", "evaluation(表)、調査フォルダ内の evaluation.xlsx"),
     code(STEP3_RUN),
     explain("文字化けの診断（必要なときだけ実行）",

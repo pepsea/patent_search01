@@ -173,7 +173,9 @@ def run(df: pd.DataFrame, html_dir: Path, delay: float = 3.0, text_dir: Path | N
                             "請求項数": x["claim_count"], "請求項": x["claims"],
                             "明細書": x["description"], "明細書文字数": len(x["description"]),
                             "名称(正規化)": nfkc(x["title"]),
-                            "全文ファイル": str(save_fulltext(text_dir, used, x, source)),
+                            # 全文 JSON は、取得に使った ID(used)ではなく、一覧の ID(pid)の名前で保存する。
+                            # 評価(手順3)が一覧の ID で探すため。種別コードを外した ID で取れた場合に、見つからなくなるのを防ぐ。
+                            "全文ファイル": str(save_fulltext(text_dir, pid, x, source)),
                             "抽出状況": x["extract_status"]})
                 # Excel のセルは約 3 万 2 千文字までなので、超える分は切り詰める(全文は JSON と HTML に残る)
                 if len(x["description"]) > EXCEL_CELL_MAX:

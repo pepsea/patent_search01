@@ -137,3 +137,63 @@ def test_link_switches_to_jplatpat_for_abstract_substituted_rows(tmp_path):
     save_evaluation_excel(df, tmp_path / "o.xlsx")
     ws = load_workbook(tmp_path / "o.xlsx")["評価結果"]
     assert {ws.cell(row=i, column=1).value: ws.cell(row=i, column=1).hyperlink.target for i in (2, 3, 4)}["特開1"] == "https://jplatpat/1"
+
+
+def test_fulltext_json_is_saved_under_the_list_id_even_when_fallback_id_worked(tmp_path, monkeypatch):
+    # 一覧の ID は JP1A。取得は種別コードなしの JP1 で成功した場合でも、評価が探す JP1A.json で保存される
+    html = ('<html><body><span itemprop="title">名称</span><section itemprop="claims"><div class="claim" num="1">'
+            '<div class="claim-text">請求項</div></div></section><section itemprop="description">'
+            '<div class="description-paragraph" num="0001">本文</div></section></body></html>')
+    monkeypatch.setattr(fetch_google, "fetch", lambda *a, **k: (html, "JP1", "200"))
+    nums = pd.DataFrame([{"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "発明の名称": "x"}])
+    res = fetch_google.run(nums, tmp_path / "html", 0, tmp_path / "text").iloc[0]
+    assert (tmp_path / "text" / "JP1A.json").exists() and not (tmp_path / "text" / "JP1.json").exists()
+    assert res["使用ID"] == "JP1" and res["全文ファイル"].endswith("JP1A.json")
+
+
+def test_check_texts_reports_and_suggests_other_run_folder(tmp_path, capsys):
+    import pytest
+
+    from patent_search.evaluate import check_texts
+
+    old_run, new_run = tmp_path / "res" / "T_20261005_100000", tmp_path / "res" / "T_20261005_110000"
+    (old_run / "text").mkdir(parents=True)
+    (new_run / "text").mkdir(parents=True)
+    (old_run / "text" / "JP1A.json").write_text("{}", encoding="utf-8")
+    nums = pd.DataFrame([{"文献番号": "特開1", "Google Patents ID(推定)": "JP1A"},
+                         {"文献番号": "特開2", "Google Patents ID(推定)": "JP2A"}])
+    # 全件に全文 JSON がある → そのまま通る
+    assert check_texts(nums.head(1), old_run / "text") == 1
+    # 一部だけある → 件数を表示して続行
+    capsys.readouterr()  # ここまでの表示を捨てる
+    assert check_texts(nums, old_run / "text") == 1
+    screen = capsys.readouterr().out
+    assert "2 件のうち、全文 JSON がある特許: 1 件" in screen and "特開2" in screen and "評価されず" in screen
+    # 1 件もない(セル4の再実行で新しい空の調査フォルダを見ている) → 止まり、全文 JSON がある別フォルダを教える
+    with pytest.raises(RuntimeError) as e:
+        check_texts(nums, new_run / "text", tmp_path / "res", new_run)
+    msg = str(e.value)
+    assert "全文 JSON が 1 件もない" in msg and 'RUN_DIR = "T_20261005_100000"' in msg and "T_20261005_110000" not in msg
+
+
+def test_missing_text_row_has_a_reason(tmp_path, capsys):
+    from patent_search.evaluate import evaluate_table
+
+    nums = pd.DataFrame([{"文献番号": "特開9", "Google Patents ID(推定)": "JP9A", "発明の名称": "x"}])
+    df = evaluate_table(lambda *a, **k: "{}", Topic("T", "d", ["k"]), nums, tmp_path, stream=True)
+    assert df.loc[0, "判定"] == "本文なし(未取得)" and "全文 JSON がありません(JP9A.json)" in df.loc[0, "理由"]
+    assert "評価を飛ばしました" in capsys.readouterr().out
+
+
+def test_failure_reason_is_printed_to_screen(tmp_path, capsys):
+    from patent_search.evaluate import evaluate_table
+
+    (tmp_path / "JP1A.json").write_text(json.dumps(ABS_ONLY), encoding="utf-8")
+    nums = pd.DataFrame([{"文献番号": "特開1", "Google Patents ID(推定)": "JP1A", "発明の名称": "x"}])
+
+    def boom(*a, **k):
+        raise ConnectionError("Ollama に接続できません")
+
+    df = evaluate_table(boom, TOPIC, nums, tmp_path)
+    assert df.loc[0, "判定"] == "判定失敗" and "接続できません" in df.loc[0, "理由"]
+    assert "判定失敗  理由: ConnectionError: Ollama に接続できません" in capsys.readouterr().out
