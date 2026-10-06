@@ -1,1 +1,4 @@
 google-cloud-bigquery>=3.25,<4
+pandas>=2
+openpyxl>=3.1
+guidance>=0.3,<0.4
